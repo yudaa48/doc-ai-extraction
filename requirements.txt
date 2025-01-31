@@ -1,0 +1,8 @@
+streamlit
+google-cloud-documentai
+google-cloud-storage
+pandas
+xlsxwriter
+pdf2image
+pillow
+PyPDF2
