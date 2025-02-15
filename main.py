@@ -761,96 +761,156 @@ class DocumentAIProcessor:
         processor_id: str,
         cleanup: bool = True
     ) -> Dict[str, Any]:
-        """Process document with improved section handling"""
+        """
+        Process document pages concurrently using ThreadPoolExecutor
+        
+        Args:
+            input_file_path (str): Path to the input PDF file
+            processor_id (str): Document AI processor ID
+            cleanup (bool): Whether to remove temporary page files after processing
+        
+        Returns:
+            Dict[str, Any]: Processed document results
+        """
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        import concurrent.futures
+        
+        # Split PDF into individual page files
         page_splitter = DocumentPageSplitter(input_file_path)
         page_files = page_splitter.split_pdf_pages()
         
+        # Initialize document result structure
         full_document_result = {
             "text": "",
             "pages": []
         }
         
+        # Create progress tracking
         progress_bar = st.progress(0)
         total_pages = len(page_files)
+        progress_text = st.empty()
         
         try:
-            for i, page_file in enumerate(page_files, 1):
-                progress_text = st.empty()
-                progress_text.text(f"Processing page {i} of {total_pages}")
-                progress_bar.progress(i / total_pages)
-                
-                processed_page = self.process_page(
-                    processor_id=processor_id,
-                    file_path=page_file,
-                    page_number=i
-                )
-                
-                page_data = {
-                    "page_number": i,
-                    "text": processed_page.get('text', ''),
-                    "hierarchical_fields": {}
+            # Determine optimal number of workers
+            max_workers = min(10, total_pages)
+            
+            # Use ThreadPoolExecutor for concurrent processing
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                # Submit processing tasks for each page
+                future_to_page = {
+                    executor.submit(
+                        self.process_page, 
+                        processor_id=processor_id, 
+                        file_path=page_file, 
+                        page_number=i
+                    ): i 
+                    for i, page_file in enumerate(page_files, 1)
                 }
                 
-                # Process each section
-                for section, entities in processed_page.get('sections', {}).items():
-                    if not entities:
-                        continue
+                # Process completed futures in order
+                processed_pages = [None] * total_pages
+                
+                # Collect results as they complete
+                for future in as_completed(future_to_page):
+                    page_num = future_to_page[future]
+                    try:
+                        # Update progress
+                        progress_text.text(f"Processing page {page_num} of {total_pages}")
+                        progress_bar.progress(page_num / total_pages)
                         
-                    # Initialize section in hierarchical fields if not exists
-                    if section not in page_data["hierarchical_fields"]:
-                        page_data["hierarchical_fields"][section] = []
-                    
-                    # Process each entity in the section
-                    for entity in entities:
-                        parent_entry = {
-                            "type": entity["type"],
-                            "value": entity.get('value', ''),
-                            "confidence": entity.get('confidence', 0),
-                            "child_fields": {}
+                        # Process the page
+                        processed_page = future.result()
+                        
+                        # Prepare page data
+                        page_data = {
+                            "page_number": page_num,
+                            "text": processed_page.get('text', ''),
+                            "hierarchical_fields": {}
                         }
                         
-                        # Process child entities
-                        for child in entity.get("child_entities", []):
-                            child_type = child["type"]
-                            if child_type not in parent_entry["child_fields"]:
-                                parent_entry["child_fields"][child_type] = []
+                        # Process each section
+                        for section, entities in processed_page.get('sections', {}).items():
+                            if not entities:
+                                continue
                             
-                            child_entry = {
-                                "type": child_type,
-                                "value": child.get('value', ''),
-                                "confidence": child.get('confidence', 0),
-                                "entities": []
-                            }
+                            # Initialize section in hierarchical fields if not exists
+                            if section not in page_data["hierarchical_fields"]:
+                                page_data["hierarchical_fields"][section] = []
                             
-                            # Process grandchild entities
-                            for grandchild in child.get("child_entities", []):
-                                entity_entry = {
-                                    "type": grandchild["type"],
-                                    "value": grandchild.get('value', ''),
-                                    "confidence": grandchild.get('confidence', 0)
+                            # Process each entity in the section
+                            for entity in entities:
+                                parent_entry = {
+                                    "type": entity["type"],
+                                    "value": entity.get('value', ''),
+                                    "confidence": entity.get('confidence', 0),
+                                    "child_fields": {}
                                 }
-                                child_entry["entities"].append(entity_entry)
-                            
-                            parent_entry["child_fields"][child_type].append(child_entry)
+                                
+                                # Process child entities
+                                for child in entity.get("child_entities", []):
+                                    child_type = child["type"]
+                                    if child_type not in parent_entry["child_fields"]:
+                                        parent_entry["child_fields"][child_type] = []
+                                    
+                                    child_entry = {
+                                        "type": child_type,
+                                        "value": child.get('value', ''),
+                                        "confidence": child.get('confidence', 0),
+                                        "entities": []
+                                    }
+                                    
+                                    # Process grandchild entities
+                                    for grandchild in child.get("child_entities", []):
+                                        entity_entry = {
+                                            "type": grandchild["type"],
+                                            "value": grandchild.get('value', ''),
+                                            "confidence": grandchild.get('confidence', 0)
+                                        }
+                                        child_entry["entities"].append(entity_entry)
+                                    
+                                    parent_entry["child_fields"][child_type].append(child_entry)
+                                
+                                # Add parent entry to appropriate section
+                                page_data["hierarchical_fields"][section].append(parent_entry)
                         
-                        # Add parent entry to appropriate section
-                        page_data["hierarchical_fields"][section].append(parent_entry)
+                        # Store page in the correct order
+                        processed_pages[page_num - 1] = page_data
+                    
+                    except Exception as e:
+                        st.error(f"Error processing page {page_num}: {str(e)}")
+                        # Store None for failed pages to maintain order
+                        processed_pages[page_num - 1] = None
                 
-                full_document_result["pages"].append(page_data)
-                full_document_result["text"] += processed_page.get('text', '') + '\n'
+                # Filter out failed pages and add to final result
+                full_document_result["pages"] = [
+                    page for page in processed_pages if page is not None
+                ]
                 
-        except Exception as e:
-            st.error(f"Error in document processing: {str(e)}")
+                # Combine text from all pages
+                full_document_result["text"] = '\n'.join(
+                    page.get('text', '') for page in full_document_result["pages"]
+                )
+        
+        except concurrent.futures.CancelledError:
+            st.error("Document processing was cancelled")
             raise
+        
+        except Exception as e:
+            st.error(f"Error in concurrent document processing: {str(e)}")
+            raise
+        
         finally:
+            # Clean up progress indicators
+            progress_bar.empty()
+            progress_text.empty()
+            
+            # Remove temporary page files if cleanup is requested
             if cleanup:
                 for page_file in page_files:
                     try:
                         os.remove(page_file)
-                    except:
-                        pass
-            progress_bar.empty()
-            progress_text.empty()
+                    except Exception as cleanup_error:
+                        st.warning(f"Could not remove temporary file {page_file}: {cleanup_error}")
         
         return full_document_result
 
