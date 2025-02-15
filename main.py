@@ -384,27 +384,73 @@ class DocumentAIProcessor:
                                 
                                 # Process child fields
                                 for child_type, child_entries in parent_entity.get("child_fields", {}).items():
-                                    for child_entry in child_entries:
-                                        # Add child information
-                                        child_row = {
-                                            "Page": page_num,
-                                            "Level": "Child",
-                                            "Type": child_type,
-                                            "Value": child_entry.get('value', ''),
-                                            "Confidence": child_entry.get('confidence', 0)
-                                        }
-                                        rows.append(child_row)
-                                        
-                                        # Process entities
-                                        for entity in child_entry.get("entities", []):
-                                            entity_row = {
+                                    # If this is person_num, track its entries
+                                    if child_type == 'person_num':
+                                        for person_idx, child_entry in enumerate(child_entries, 1):
+                                            # Add a header row for each person
+                                            person_header_row = {
                                                 "Page": page_num,
-                                                "Level": "Entity",
-                                                "Type": entity.get('type', ''),
-                                                "Value": entity.get('value', ''),
-                                                "Confidence": entity.get('confidence', 0)
+                                                "Level": "Person Header",
+                                                "Type": f"Person {person_idx}",
+                                                "Value": f"Person {person_idx} Details",
+                                                "Confidence": ""
                                             }
-                                            rows.append(entity_row)
+                                            rows.append(person_header_row)
+                                            
+                                            # Add child information
+                                            child_row = {
+                                                "Page": page_num,
+                                                "Level": "Child",
+                                                "Type": child_type,
+                                                "Value": child_entry.get('value', ''),
+                                                "Confidence": child_entry.get('confidence', 0)
+                                            }
+                                            rows.append(child_row)
+                                            
+                                            # Process entities for this person
+                                            for entity in child_entry.get("entities", []):
+                                                entity_row = {
+                                                    "Page": page_num,
+                                                    "Level": "Entity",
+                                                    "Type": entity.get('type', ''),
+                                                    "Value": entity.get('value', ''),
+                                                    "Confidence": entity.get('confidence', 0)
+                                                }
+                                                rows.append(entity_row)
+                                            
+                                            # Add a separator row after each person's details
+                                            separator_row = {
+                                                "Page": page_num,
+                                                "Level": "Separator",
+                                                "Type": "",
+                                                "Value": "",
+                                                "Confidence": ""
+                                            }
+                                            rows.append(separator_row)
+                                    
+                                    # For other child types, process normally
+                                    else:
+                                        for child_entry in child_entries:
+                                            # Add child information
+                                            child_row = {
+                                                "Page": page_num,
+                                                "Level": "Child",
+                                                "Type": child_type,
+                                                "Value": child_entry.get('value', ''),
+                                                "Confidence": child_entry.get('confidence', 0)
+                                            }
+                                            rows.append(child_row)
+                                            
+                                            # Process entities
+                                            for entity in child_entry.get("entities", []):
+                                                entity_row = {
+                                                    "Page": page_num,
+                                                    "Level": "Entity",
+                                                    "Type": entity.get('type', ''),
+                                                    "Value": entity.get('value', ''),
+                                                    "Confidence": entity.get('confidence', 0)
+                                                }
+                                                rows.append(entity_row)
                                 
                                 if rows:
                                     # Create DataFrame and write to Excel
@@ -419,10 +465,29 @@ class DocumentAIProcessor:
                                             len(str(col))
                                         ) + 2
                                         worksheet.set_column(idx, idx, min(max_length, 50))
+                                    
+                                    # Format header and separator rows
+                                    workbook = writer.book
+                                    header_format = workbook.add_format({
+                                        'bold': True, 
+                                        'bg_color': '#D3D3D3',  # Light gray background
+                                        'align': 'center'
+                                    })
+                                    
+                                    separator_format = workbook.add_format({
+                                        'bottom': 1,  # Bottom border
+                                        'bottom_color': 'black'
+                                    })
+                                    
+                                    # Find and format header and separator rows
+                                    for row_idx, row in enumerate(rows, 1):  # Excel rows are 1-indexed
+                                        if row.get('Level') == 'Person Header':
+                                            worksheet.set_row(row_idx, None, header_format)
+                                        elif row.get('Level') == 'Separator':
+                                            worksheet.set_row(row_idx, None, separator_format)
                         
-                        # Handle other section types normally
+                        # Handle other section types
                         else:
-                            # Existing logic for other section types
                             if parent_type not in section_unique_trackers:
                                 section_unique_trackers[parent_type] = 0
                             section_unique_trackers[parent_type] += 1
@@ -499,13 +564,6 @@ class DocumentAIProcessor:
             os.remove('temp_output.xlsx')
             
             return f"gs://{bucket_name}/{full_blob_path}"
-            
-        except Exception as e:
-            st.error(f"Excel Save Error: {str(e)}")
-            # Clean up temp file if it exists
-            if os.path.exists('temp_output.xlsx'):
-                os.remove('temp_output.xlsx')
-            raise
             
         except Exception as e:
             st.error(f"Excel Save Error: {str(e)}")
