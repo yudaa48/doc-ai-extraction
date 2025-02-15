@@ -362,68 +362,128 @@ class DocumentAIProcessor:
                     
                     # Process each section in the page
                     for parent_type, parent_entities in page.get("hierarchical_fields", {}).items():
-                        # Ensure we can handle multiple instances of the same section type
-                        if parent_type not in section_unique_trackers:
-                            section_unique_trackers[parent_type] = 0
-                        section_unique_trackers[parent_type] += 1
-                        
-                        # Create unique sheet name
-                        sheet_suffix = section_unique_trackers[parent_type]
-                        sheet_name = f"P{page_num}_{parent_type}_{sheet_suffix}"
-                        
-                        # Truncate to valid Excel sheet name (max 31 characters)
-                        sheet_name = sheet_name[:31]
-                        
-                        # Prepare data for this section
-                        rows = []
-                        for parent_entity in parent_entities:
-                            # Add parent information
-                            parent_row = {
-                                "Page": page_num,
-                                "Level": "Parent",
-                                "Type": parent_type,
-                                "Value": parent_entity.get('value', ''),
-                                "Confidence": parent_entity.get('confidence', 0)
-                            }
-                            rows.append(parent_row)
-                            
-                            # Process child fields
-                            for child_type, child_entries in parent_entity.get("child_fields", {}).items():
-                                for child_entry in child_entries:
-                                    # Add child information
-                                    child_row = {
-                                        "Page": page_num,
-                                        "Level": "Child",
-                                        "Type": child_type,
-                                        "Value": child_entry.get('value', ''),
-                                        "Confidence": child_entry.get('confidence', 0)
-                                    }
-                                    rows.append(child_row)
-                                    
-                                    # Process entities
-                                    for entity in child_entry.get("entities", []):
-                                        entity_row = {
+                        # Special handling for multiple vehicle_driver_persons
+                        if parent_type == 'vehicle_driver_persons':
+                            # Create a separate sheet for each parent entity
+                            for parent_idx, parent_entity in enumerate(parent_entities, 1):
+                                # Create unique sheet name
+                                sheet_name = f"P{page_num}_vehicle_driver_{parent_idx}"
+                                
+                                # Prepare data for this section
+                                rows = []
+                                
+                                # Add parent information
+                                parent_row = {
+                                    "Page": page_num,
+                                    "Level": "Parent",
+                                    "Type": parent_type,
+                                    "Value": parent_entity.get('value', ''),
+                                    "Confidence": parent_entity.get('confidence', 0)
+                                }
+                                rows.append(parent_row)
+                                
+                                # Process child fields
+                                for child_type, child_entries in parent_entity.get("child_fields", {}).items():
+                                    for child_entry in child_entries:
+                                        # Add child information
+                                        child_row = {
                                             "Page": page_num,
-                                            "Level": "Entity",
-                                            "Type": entity.get('type', ''),
-                                            "Value": entity.get('value', ''),
-                                            "Confidence": entity.get('confidence', 0)
+                                            "Level": "Child",
+                                            "Type": child_type,
+                                            "Value": child_entry.get('value', ''),
+                                            "Confidence": child_entry.get('confidence', 0)
                                         }
-                                        rows.append(entity_row)
+                                        rows.append(child_row)
+                                        
+                                        # Process entities
+                                        for entity in child_entry.get("entities", []):
+                                            entity_row = {
+                                                "Page": page_num,
+                                                "Level": "Entity",
+                                                "Type": entity.get('type', ''),
+                                                "Value": entity.get('value', ''),
+                                                "Confidence": entity.get('confidence', 0)
+                                            }
+                                            rows.append(entity_row)
+                                
+                                if rows:
+                                    # Create DataFrame and write to Excel
+                                    df = pd.DataFrame(rows)
+                                    df.to_excel(writer, sheet_name=sheet_name, index=False)
+                                    
+                                    # Adjust column widths
+                                    worksheet = writer.sheets[sheet_name]
+                                    for idx, col in enumerate(df.columns):
+                                        max_length = max(
+                                            df[col].astype(str).apply(len).max(),
+                                            len(str(col))
+                                        ) + 2
+                                        worksheet.set_column(idx, idx, min(max_length, 50))
                         
-                        if rows:
-                            # Create DataFrame and write to Excel
-                            df = pd.DataFrame(rows)
-                            df.to_excel(writer, sheet_name=sheet_name, index=False)
+                        # Handle other section types normally
+                        else:
+                            # Existing logic for other section types
+                            if parent_type not in section_unique_trackers:
+                                section_unique_trackers[parent_type] = 0
+                            section_unique_trackers[parent_type] += 1
                             
-                            # Adjust column widths
-                            worksheet = writer.sheets[sheet_name]
-                            for idx, col in enumerate(df.columns):
-                                max_length = max(
-                                    df[col].astype(str).apply(len).max(),
-                                    len(str(col))
-                                ) + 2
-                                worksheet.set_column(idx, idx, min(max_length, 50))
+                            # Create unique sheet name
+                            sheet_suffix = section_unique_trackers[parent_type]
+                            sheet_name = f"P{page_num}_{parent_type}_{sheet_suffix}"
+                            
+                            # Truncate to valid Excel sheet name (max 31 characters)
+                            sheet_name = sheet_name[:31]
+                            
+                            # Prepare data for this section
+                            rows = []
+                            for parent_entity in parent_entities:
+                                # Add parent information
+                                parent_row = {
+                                    "Page": page_num,
+                                    "Level": "Parent",
+                                    "Type": parent_type,
+                                    "Value": parent_entity.get('value', ''),
+                                    "Confidence": parent_entity.get('confidence', 0)
+                                }
+                                rows.append(parent_row)
+                                
+                                # Process child fields
+                                for child_type, child_entries in parent_entity.get("child_fields", {}).items():
+                                    for child_entry in child_entries:
+                                        # Add child information
+                                        child_row = {
+                                            "Page": page_num,
+                                            "Level": "Child",
+                                            "Type": child_type,
+                                            "Value": child_entry.get('value', ''),
+                                            "Confidence": child_entry.get('confidence', 0)
+                                        }
+                                        rows.append(child_row)
+                                        
+                                        # Process entities
+                                        for entity in child_entry.get("entities", []):
+                                            entity_row = {
+                                                "Page": page_num,
+                                                "Level": "Entity",
+                                                "Type": entity.get('type', ''),
+                                                "Value": entity.get('value', ''),
+                                                "Confidence": entity.get('confidence', 0)
+                                            }
+                                            rows.append(entity_row)
+                            
+                            if rows:
+                                # Create DataFrame and write to Excel
+                                df = pd.DataFrame(rows)
+                                df.to_excel(writer, sheet_name=sheet_name, index=False)
+                                
+                                # Adjust column widths
+                                worksheet = writer.sheets[sheet_name]
+                                for idx, col in enumerate(df.columns):
+                                    max_length = max(
+                                        df[col].astype(str).apply(len).max(),
+                                        len(str(col))
+                                    ) + 2
+                                    worksheet.set_column(idx, idx, min(max_length, 50))
             
             # Upload to GCS
             bucket_name = bucket_name.replace('gs://', '')
@@ -439,6 +499,13 @@ class DocumentAIProcessor:
             os.remove('temp_output.xlsx')
             
             return f"gs://{bucket_name}/{full_blob_path}"
+            
+        except Exception as e:
+            st.error(f"Excel Save Error: {str(e)}")
+            # Clean up temp file if it exists
+            if os.path.exists('temp_output.xlsx'):
+                os.remove('temp_output.xlsx')
+            raise
             
         except Exception as e:
             st.error(f"Excel Save Error: {str(e)}")
