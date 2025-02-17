@@ -349,249 +349,525 @@ class DocumentAIProcessor:
         except Exception as e:
             st.error(f"JSON Save Error: {str(e)}")
             raise
+    
+    def _process_identification_location(self, identification_locations):
+        """
+        Process identification location data from multiple location entries
+        
+        Args:
+            identification_locations (list): List of identification location dictionaries
+        
+        Returns:
+            list: Processed rows for Excel export
+        """
+        if not identification_locations or len(identification_locations) < 3:
+            return []
+        
+        rows = []
+        
+        # Sections mapping
+        sections = {
+            0: "General Information",
+            1: "Road on Which Crash Occurred",
+            2: "Intersecting Road or Nearest Reference Marker"
+        }
+        
+        # Keys to extract for each section
+        section_keys = {
+            0: [
+                'case_id', 'crash_date', 'crash_time', 'local_use', 
+                'country_name', 'city_name', 'outside_city_limit', 
+                'crash_damage_1000'
+            ],
+            1: [
+                'rdwy_sys', 'block_num', 'street_name', 'street_suffix', 
+                'dir_of_traffic', 'speed_limit', 'hwy_num'
+            ],
+            2: [
+                'rdwy_sys', 'block_num', 'street_name', 'street_suffix', 
+                'distance_from_int_of_ref_marker', 'dir_from_int_or_ref_marker', 
+                'speed_limit', 'hwy_num'
+            ]
+        }
+        
+        # Add section headers
+        for idx, section_name in sections.items():
+            location = identification_locations[idx]
+            
+            # Section header row
+            rows.append({
+                "Section": section_name,
+                "Type": "Section Header"
+            })
+            
+            # Process child fields for this section
+            row = {"Section": section_name}
+            
+            # Extract specified keys for this section
+            for key in section_keys.get(idx, []):
+                child_entries = location.get('child_fields', {}).get(key, [])
+                
+                # Get the first value if exists
+                value = child_entries[0].get('value', '') if child_entries else ''
+                
+                # Add to row
+                row[key] = value
+            
+            rows.append(row)
+        
+        return rows
 
     def save_excel_to_gcs(self, bucket_name: str, data: Dict[str, Any], filename: str, prefix: str = '') -> str:
-        """Save hierarchical data to Excel with multiple sheets and organized location sections"""
+        """Save processed crash report data to Excel, organized by vehicle units."""
+        import os
+        import tempfile
+        import time
+        
         try:
-            # Create Excel writer with xlsxwriter engine
-            with pd.ExcelWriter('temp_output.xlsx', engine='xlsxwriter') as writer:
-                # Process each page
-                for page in data.get("pages", []):
-                    page_num = page["page_number"]
+            # Create a temporary directory for Excel files
+            with tempfile.TemporaryDirectory() as temp_dir:
+                temp_file = os.path.join(temp_dir, f'crash_report_{int(time.time())}.xlsx')
+                
+                # Create Excel writer with proper configuration
+                with pd.ExcelWriter(
+                    temp_file,
+                    engine='xlsxwriter',
+                    engine_kwargs={'options': {
+                        'strings_to_urls': False,
+                        'constant_memory': True
+                    }}
+                ) as writer:
+                    workbook = writer.book
                     
-                    # Process identification_location sections
-                    id_locations = page.get("hierarchical_fields", {}).get("identification_location", [])
-                    if id_locations:
-                        sheet_name = f"P{page_num}_identification_location"[:31]
-                        rows = []
-                        
-                        # Process each identification_location section
-                        section_names = ["General Information", "Road of Crash", "Intersecting Road"]
-                        
-                        for idx, location in enumerate(id_locations):
-                            # Add section header
-                            if idx < len(section_names):
-                                section_header = {
-                                    "Page": page_num,
-                                    "Level": "Section Header",
-                                    "Type": section_names[idx],
-                                    "Value": "",
-                                    "Confidence": ""
-                                }
-                                rows.append(section_header)
-                            
-                            # Process fields within each section
-                            for field_type, field_entries in location.get("child_fields", {}).items():
-                                for entry in field_entries:
-                                    field_row = {
-                                        "Page": page_num,
-                                        "Level": "Field",
-                                        "Type": field_type,
-                                        "Value": entry.get('value', ''),
-                                        "Confidence": f"{entry.get('confidence', 0):.2%}"
-                                    }
-                                    rows.append(field_row)
-                            
-                            # Add separator after each section
-                            separator_row = {
-                                "Page": page_num,
-                                "Level": "Separator",
-                                "Type": "",
-                                "Value": "",
-                                "Confidence": ""
-                            }
-                            rows.append(separator_row)
-                        
-                        if rows:
-                            df = pd.DataFrame(rows)
-                            df.to_excel(writer, sheet_name=sheet_name, index=False)
-                            
-                            # Format the worksheet
-                            worksheet = writer.sheets[sheet_name]
-                            workbook = writer.book
-                            
-                            # Create formats
-                            header_format = workbook.add_format({
-                                'bold': True,
-                                'bg_color': '#D3D3D3',
-                                'align': 'center'
-                            })
-                            
-                            separator_format = workbook.add_format({
-                                'bottom': 1
-                            })
-                            
-                            # Apply formats
-                            for row_idx, row in enumerate(rows, 1):
-                                if row.get('Level') == 'Section Header':
-                                    worksheet.set_row(row_idx, None, header_format)
-                                elif row.get('Level') == 'Separator':
-                                    worksheet.set_row(row_idx, None, separator_format)
-                            
-                            # Adjust column widths
-                            self._adjust_column_widths(writer, sheet_name, df)
+                    # Create formats for styling
+                    header_format = workbook.add_format({
+                        'bold': True,
+                        'bg_color': '#D3D3D3',
+                        'border': 1,
+                        'text_wrap': True
+                    })
                     
-                    # Process other sections (vehicle_driver_persons, etc.)
-                    for parent_type, parent_entities in page.get("hierarchical_fields", {}).items():
-                        # Skip identification_location as it's already processed
-                        if parent_type == 'identification_location':
+                    section_format = workbook.add_format({
+                        'bold': True,
+                        'bg_color': '#E6E6FA',
+                        'border': 1
+                    })
+                    
+                    # Process each page
+                    for page in data.get("pages", []):
+                        # Skip certification page
+                        if "STATE OF TEXAS\nR\nTexas Department of Transportation\n125 EAST 11TH STREET" in page.get('text', ''):
                             continue
                             
-                        # Tracking unique identifiers for sections
-                        section_unique_trackers = {}
+                        # Process vehicle driver persons to create one sheet per unit
+                        vehicle_drivers = page.get("hierarchical_fields", {}).get("vehicle_driver_persons", [])
                         
-                        if parent_type == 'vehicle_driver_persons':
-                            # Create a separate sheet for each parent entity
-                            for parent_idx, parent_entity in enumerate(parent_entities, 1):
-                                sheet_name = f"P{page_num}_vehicle_driver_{parent_idx}"[:31]
-                                rows = []
-                                
-                                # Add parent information
-                                parent_row = {
-                                    "Page": page_num,
-                                    "Level": "Parent",
-                                    "Type": parent_type,
-                                    "Value": parent_entity.get('value', ''),
-                                    "Confidence": f"{parent_entity.get('confidence', 0):.2%}"
-                                }
-                                rows.append(parent_row)
-                                
-                                # Process child fields
-                                for child_type, child_entries in parent_entity.get("child_fields", {}).items():
-                                    if child_type == 'person_num':
-                                        for person_idx, child_entry in enumerate(child_entries, 1):
-                                            # Add person header
-                                            person_header_row = {
-                                                "Page": page_num,
-                                                "Level": "Person Header",
-                                                "Type": f"Person {person_idx}",
-                                                "Value": f"Person {person_idx} Details",
-                                                "Confidence": ""
-                                            }
-                                            rows.append(person_header_row)
-                                            
-                                            # Process person entities
-                                            for entity in child_entry.get("entities", []):
-                                                entity_row = {
-                                                    "Page": page_num,
-                                                    "Level": "Entity",
-                                                    "Type": entity.get('type', ''),
-                                                    "Value": entity.get('value', ''),
-                                                    "Confidence": f"{entity.get('confidence', 0):.2%}"
-                                                }
-                                                rows.append(entity_row)
-                                            
-                                            # Add separator
-                                            rows.append({
-                                                "Page": page_num,
-                                                "Level": "Separator",
-                                                "Type": "",
-                                                "Value": "",
-                                                "Confidence": ""
-                                            })
-                                    else:
-                                        # Process other child fields
-                                        for child_entry in child_entries:
-                                            child_row = {
-                                                "Page": page_num,
-                                                "Level": "Child",
-                                                "Type": child_type,
-                                                "Value": child_entry.get('value', ''),
-                                                "Confidence": f"{child_entry.get('confidence', 0):.2%}"
-                                            }
-                                            rows.append(child_row)
-                                
-                                if rows:
-                                    df = pd.DataFrame(rows)
-                                    df.to_excel(writer, sheet_name=sheet_name, index=False)
-                                    
-                                    # Format worksheet
-                                    worksheet = writer.sheets[sheet_name]
-                                    workbook = writer.book
-                                    header_format = workbook.add_format({
-                                        'bold': True,
-                                        'bg_color': '#D3D3D3',
-                                        'align': 'center'
-                                    })
-                                    
-                                    separator_format = workbook.add_format({
-                                        'bottom': 1
-                                    })
-                                    
-                                    for row_idx, row in enumerate(rows, 1):
-                                        if row.get('Level') == 'Person Header':
-                                            worksheet.set_row(row_idx, None, header_format)
-                                        elif row.get('Level') == 'Separator':
-                                            worksheet.set_row(row_idx, None, separator_format)
-                                    
-                                    self._adjust_column_widths(writer, sheet_name, df)
-                        else:
-                            # Handle other section types
-                            if parent_type not in section_unique_trackers:
-                                section_unique_trackers[parent_type] = 0
-                            section_unique_trackers[parent_type] += 1
+                        for unit_data in vehicle_drivers:
+                            # Get unit number
+                            unit_num = next((field["value"] for field in unit_data.get("child_fields", {}).get("unit_num", [])
+                                        if field.get("value")), "Unknown")
                             
-                            sheet_name = f"P{page_num}_{parent_type}_{section_unique_trackers[parent_type]}"[:31]
-                            rows = []
+                            # Get driver name (person_type = 1 is driver)
+                            driver_name = "Unknown Driver"
+                            for person in unit_data.get("child_fields", {}).get("person_num", []):
+                                entities = person.get("entities", [])
+                                if any(e.get("type") == "person_type" and e.get("value") == "1" for e in entities):
+                                    for entity in entities:
+                                        if entity.get("type") == "person_name":
+                                            driver_name = entity.get("value")
+                                            break
+                                    break
                             
-                            for parent_entity in parent_entities:
-                                parent_row = {
-                                    "Page": page_num,
-                                    "Level": "Parent",
-                                    "Type": parent_type,
-                                    "Value": parent_entity.get('value', ''),
-                                    "Confidence": f"{parent_entity.get('confidence', 0):.2%}"
-                                }
-                                rows.append(parent_row)
+                            # Create sheet name
+                            sheet_name = f"Unit {unit_num} - {driver_name}"[:31]  # Excel limit
+                            worksheet = workbook.add_worksheet(sheet_name)
+                            
+                            # Initialize current row
+                            current_row = 0
+                            
+                            # Vehicle Information Section
+                            vehicle_info = []
+                            worksheet.write(current_row, 0, "Vehicle Information", section_format)
+                            current_row += 1
+                            
+                            vehicle_fields = [
+                                ("veh_year", "Year"), ("veh_make", "Make"), ("veh_model", "Model"),
+                                ("veh_color", "Color"), ("vin", "VIN"), ("lp_state", "License Plate State"),
+                                ("lp_num", "License Plate Number")
+                            ]
+                            
+                            for field_key, field_name in vehicle_fields:
+                                value = next((entry["value"] for entry in unit_data.get("child_fields", {}).get(field_key, [])), "")
+                                worksheet.write(current_row, 0, field_name)
+                                worksheet.write(current_row, 1, value)
+                                current_row += 1
+                            
+                            current_row += 1
+                            
+                            # People Section (Driver + Passengers)
+                            worksheet.write(current_row, 0, "People Information", section_format)
+                            current_row += 1
+                            
+                            for person in unit_data.get("child_fields", {}).get("person_num", []):
+                                person_info = {}
+                                is_driver = False
                                 
-                                for child_type, child_entries in parent_entity.get("child_fields", {}).items():
-                                    for child_entry in child_entries:
-                                        child_row = {
-                                            "Page": page_num,
-                                            "Level": "Child",
-                                            "Type": child_type,
-                                            "Value": child_entry.get('value', ''),
-                                            "Confidence": f"{child_entry.get('confidence', 0):.2%}"
-                                        }
-                                        rows.append(child_row)
+                                for entity in person.get("entities", []):
+                                    if entity.get("type") == "person_type" and entity.get("value") == "1":
+                                        is_driver = True
+                                    if entity.get("type") == "person_name":
+                                        person_info["name"] = entity.get("value")
+                                    if entity.get("type") == "person_description":
+                                        desc_parts = entity.get("value", "").split()
+                                        if len(desc_parts) >= 2:
+                                            person_info["age"] = desc_parts[1]
+                                            if len(desc_parts) >= 3:
+                                                person_info["ethnicity"] = desc_parts[2]
+                                
+                                person_type = "Driver" if is_driver else "Passenger"
+                                worksheet.write(current_row, 0, f"{person_type} Information")
+                                current_row += 1
+                                
+                                for key, value in person_info.items():
+                                    worksheet.write(current_row, 0, key.title())
+                                    worksheet.write(current_row, 1, value)
+                                    current_row += 1
+                                
+                                current_row += 1
+                            
+                            # Get charges for this unit
+                            charges = page.get("hierarchical_fields", {}).get("charges", [])
+                            charges_found = False
+                            
+                            for charge_entry in charges:
+                                unit_num_fields = charge_entry.get("child_fields", {}).get("unit_num", [])
+                                for field in unit_num_fields:
+                                    entities = field.get("entities", [])
+                                    
+                                    # Look for matching unit number in unit_num_charges
+                                    if any(e.get("type") == "unit_num_charges" and e.get("value") == unit_num 
+                                        for e in entities):
+                                        if not charges_found:
+                                            worksheet.write(current_row, 0, "Charges Information", section_format)
+                                            current_row += 1
+                                            charges_found = True
                                         
-                                        for entity in child_entry.get("entities", []):
-                                            entity_row = {
-                                                "Page": page_num,
-                                                "Level": "Entity",
-                                                "Type": entity.get('type', ''),
-                                                "Value": entity.get('value', ''),
-                                                "Confidence": f"{entity.get('confidence', 0):.2%}"
-                                            }
-                                            rows.append(entity_row)
+                                        # Get charge details
+                                        person_num = next((e.get("value") for e in entities 
+                                                        if e.get("type") == "person_num_charges"), "")
+                                        charge = next((e.get("value") for e in entities 
+                                                    if e.get("type") == "charge"), "")
+                                        citation = next((e.get("value") for e in entities 
+                                                    if e.get("type") == "citation_ref_num"), "")
+                                        
+                                        worksheet.write(current_row, 0, "Person Number")
+                                        worksheet.write(current_row, 1, person_num)
+                                        current_row += 1
+                                        
+                                        worksheet.write(current_row, 0, "Charge")
+                                        worksheet.write(current_row, 1, charge)
+                                        current_row += 1
+                                        
+                                        worksheet.write(current_row, 0, "Citation")
+                                        worksheet.write(current_row, 1, citation)
+                                        current_row += 1
+                                        
+                                        current_row += 1
                             
-                            if rows:
-                                df = pd.DataFrame(rows)
-                                df.to_excel(writer, sheet_name=sheet_name, index=False)
-                                self._adjust_column_widths(writer, sheet_name, df)
-            
-            # Upload to GCS
-            bucket_name = bucket_name.replace('gs://', '')
-            bucket = self.storage_client.bucket(bucket_name)
-            
-            full_blob_path = f"{prefix}/{filename}" if prefix else filename
-            full_blob_path = full_blob_path.replace('//', '/')
-            
-            blob = bucket.blob(full_blob_path)
-            blob.upload_from_filename('temp_output.xlsx')
-            
-            # Clean up temporary file
-            os.remove('temp_output.xlsx')
-            
-            return f"gs://{bucket_name}/{full_blob_path}"
-            
+                            # Get factors for this unit
+                            factors = page.get("hierarchical_fields", {}).get("factors_conditions", [])
+                            factors_found = False
+                            
+                            for factor_entry in factors:
+                                factor_fields = factor_entry.get("child_fields", {}).get("unit_contributing_factors", [])
+                                for field in factor_fields:
+                                    entities = field.get("entities", [])
+                                    
+                                    # Look for matching unit number in unit_num_contributing
+                                    if any(e.get("type") == "unit_num_contributing" and e.get("value") == unit_num 
+                                        for e in entities):
+                                        if not factors_found:
+                                            worksheet.write(current_row, 0, "Factors & Conditions", section_format)
+                                            current_row += 1
+                                            factors_found = True
+                                        
+                                        # Get all factors
+                                        factor_fields = [
+                                            ("contributing_contributing_factors", "Contributing Factor"),
+                                            ("weather_cond", "Weather Condition"),
+                                            ("roadway_type", "Road Type"),
+                                            ("traffic_control", "Traffic Control"),
+                                            ("surface_condition", "Surface Condition")
+                                        ]
+                                        
+                                        for field_type, field_name in factor_fields:
+                                            value = next((e.get("value") for e in entities 
+                                                        if e.get("type") == field_type), "")
+                                            if value:
+                                                worksheet.write(current_row, 0, field_name)
+                                                worksheet.write(current_row, 1, value)
+                                                current_row += 1
+                                        
+                                        current_row += 1
+                            
+                            # Get disposition for this unit
+                            dispositions = page.get("hierarchical_fields", {}).get("disposition_of_injured_killed", [])
+                            disposition_found = False
+                            
+                            for disp_entry in dispositions:
+                                disp_fields = disp_entry.get("child_fields", {}).get("unit_num_disposition", [])
+                                for field in disp_fields:
+                                    entities = field.get("entities", [])
+                                    
+                                    # Look for matching unit number in unit_num_disp
+                                    if any(e.get("type") == "unit_num_disp" and e.get("value") == unit_num 
+                                        for e in entities):
+                                        if not disposition_found:
+                                            worksheet.write(current_row, 0, "Disposition Information", section_format)
+                                            current_row += 1
+                                            disposition_found = True
+                                        
+                                        # Get disposition details
+                                        person_num = next((e.get("value") for e in entities 
+                                                        if e.get("type") == "person_num_disposition"), "")
+                                        taken_to = next((e.get("value") for e in entities 
+                                                    if e.get("type") == "taken_to"), "")
+                                        taken_by = next((e.get("value") for e in entities 
+                                                    if e.get("type") == "taken_by"), "")
+                                        
+                                        worksheet.write(current_row, 0, "Person Number")
+                                        worksheet.write(current_row, 1, person_num)
+                                        current_row += 1
+                                        
+                                        worksheet.write(current_row, 0, "Taken To")
+                                        worksheet.write(current_row, 1, taken_to)
+                                        current_row += 1
+                                        
+                                        worksheet.write(current_row, 0, "Taken By")
+                                        worksheet.write(current_row, 1, taken_by)
+                                        current_row += 1
+                                        
+                                        current_row += 1
+                            
+                            # Adjust column widths
+                            worksheet.set_column(0, 0, 30)  # Field names
+                            worksheet.set_column(1, 1, 40)  # Values
+                            worksheet.set_column(2, 2, 30)  # Additional info
+                    
+                    # Ensure writer is properly closed
+                    writer.close()
+                
+                # Upload to GCS
+                bucket_name = bucket_name.replace('gs://', '')
+                bucket = self.storage_client.bucket(bucket_name)
+                
+                full_blob_path = f"{prefix}/{filename}" if prefix else filename
+                full_blob_path = full_blob_path.replace('//', '/')
+                
+                blob = bucket.blob(full_blob_path)
+                blob.upload_from_filename(
+                    temp_file,
+                    content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+                )
+                
+                return f"gs://{bucket_name}/{full_blob_path}"
+                
         except Exception as e:
             st.error(f"Excel Save Error: {str(e)}")
-            # Clean up temp file if it exists
-            if os.path.exists('temp_output.xlsx'):
-                os.remove('temp_output.xlsx')
             raise
 
+    def _process_location_section(self, location: Dict, custom_order: List[str]) -> List[Dict]:
+        """
+        Process location section with custom ordering and type conversion
+        
+        Args:
+            location (Dict): Location section data
+            custom_order (List[str]): Ordered list of fields to extract
+        
+        Returns:
+            List[Dict]: Processed location data
+        """
+        rows = []
+        
+        # Create a dictionary of available fields
+        available_fields = {}
+        for child_type, child_entries in location.get("child_fields", {}).items():
+            for child_entry in child_entries:
+                for entity in child_entry.get("entities", []):
+                    # Convert checkbox to boolean
+                    value = entity.get('value', '')
+                    if value.lower() in ['checked', 'yes', 'true', '☑']:
+                        value = True
+                    elif value.lower() in ['unchecked', 'no', 'false', '☐']:
+                        value = False
+                    
+                    available_fields[entity.get('type', '')] = value
+        
+        # Build rows based on custom order
+        for field in custom_order:
+            rows.append({
+                "Type": field,
+                "Value": available_fields.get(field, ''),
+            })
+        
+        return rows
+
+    def _process_vehicle_driver_sections(self, writer, parent_entities: List[Dict], page_num: int):
+        """
+        Process vehicle driver sections with enhanced tracking
+        
+        Args:
+            writer: Excel writer object
+            parent_entities (List[Dict]): Vehicle driver entities
+            page_num (int): Current page number
+        """
+        # Sort entities by unit number
+        sorted_entities = sorted(
+            parent_entities, 
+            key=lambda x: x.get('child_fields', {}).get('unit_num', [{}])[0].get('value', '')
+        )
+        
+        # Process each vehicle
+        for vehicle_idx, parent_entity in enumerate(sorted_entities, 1):
+            # Prepare rows for this vehicle
+            rows = []
+            
+            # Add vehicle header
+            rows.append({
+                "Page": page_num,
+                "Level": "Vehicle",
+                "Unit": vehicle_idx
+            })
+            
+            # Process persons
+            persons = parent_entity.get('child_fields', {}).get('person_num', [])
+            
+            for person_idx, person in enumerate(persons, 1):
+                # Create unique person details with incremental numbering
+                person_details = {
+                    f"Person{person_idx}_description": "",
+                    f"Person{person_idx}_name": "",
+                    f"Person{person_idx}_num1": "",
+                    f"Person{person_idx}_seat_position": "",
+                    f"Person{person_idx}_type": ""
+                }
+                
+                # Populate person details
+                for entity in person.get('entities', []):
+                    entity_type = entity.get('type', '')
+                    entity_value = entity.get('value', '')
+                    
+                    if entity_type == 'person_description':
+                        person_details[f"Person{person_idx}_description"] = entity_value
+                    elif entity_type == 'person_name':
+                        person_details[f"Person{person_idx}_name"] = entity_value
+                    elif entity_type == 'person_num1':
+                        person_details[f"Person{person_idx}_num1"] = entity_value
+                    elif entity_type == 'person_seat_position':
+                        person_details[f"Person{person_idx}_seat_position"] = entity_value
+                    elif entity_type == 'person_type':
+                        person_details[f"Person{person_idx}_type"] = entity_value
+                
+                # Add person details to rows
+                rows.append(person_details)
+            
+            # Write vehicle data to Excel
+            if rows:
+                df = pd.DataFrame(rows)
+                sheet_name = f"P{page_num}_vehicle_driver_{vehicle_idx}"
+                df.to_excel(writer, sheet_name=sheet_name, index=False)
+                
+                # Adjust column widths
+                worksheet = writer.sheets[sheet_name]
+                for idx, col in enumerate(df.columns):
+                    max_length = max(
+                        df[col].astype(str).apply(len).max(),
+                        len(str(col))
+                    ) + 2
+                    worksheet.set_column(idx, idx, min(max_length, 50))
+
+    def _process_standard_section(self, writer, parent_type: str, parent_entities: List[Dict], page_num: int):
+        """
+        Process standard sections
+        
+        Args:
+            writer: Excel writer object
+            parent_type (str): Type of parent section
+            parent_entities (List[Dict]): Parent entities
+            page_num (int): Current page number
+        """
+        # Tracking unique identifiers for sections
+        section_unique_trackers = {}
+        
+        # Create unique sheet name
+        if parent_type not in section_unique_trackers:
+            section_unique_trackers[parent_type] = 0
+        section_unique_trackers[parent_type] += 1
+        
+        sheet_suffix = section_unique_trackers[parent_type]
+        sheet_name = f"P{page_num}_{parent_type}_{sheet_suffix}"
+        
+        # Truncate to valid Excel sheet name (max 31 characters)
+        sheet_name = sheet_name[:31]
+        
+        # Prepare data for this section
+        rows = []
+        for parent_entity in parent_entities:
+            # Add parent information
+            parent_row = {
+                "Page": page_num,
+                "Level": "Parent",
+                "Type": parent_type,
+                "Value": parent_entity.get('value', ''),
+                "Confidence": parent_entity.get('confidence', 0)
+            }
+            rows.append(parent_row)
+            
+            # Process child fields
+            for child_type, child_entries in parent_entity.get("child_fields", {}).items():
+                for child_entry in child_entries:
+                    # Convert checkbox to boolean
+                    child_value = child_entry.get('value', '')
+                    if child_value.lower() in ['checked', 'yes', 'true', '☑']:
+                        child_value = True
+                    elif child_value.lower() in ['unchecked', 'no', 'false', '☐']:
+                        child_value = False
+                    
+                    # Add child information
+                    child_row = {
+                        "Page": page_num,
+                        "Level": "Child",
+                        "Type": child_type,
+                        "Value": child_value,
+                        "Confidence": child_entry.get('confidence', 0)
+                    }
+                    rows.append(child_row)
+                    
+                    # Process entities
+                    for entity in child_entry.get("entities", []):
+                        entity_row = {
+                            "Page": page_num,
+                            "Level": "Entity",
+                            "Type": entity.get('type', ''),
+                            "Value": entity.get('value', ''),
+                            "Confidence": entity.get('confidence', 0)
+                        }
+                        rows.append(entity_row)
+            
+            if rows:
+                # Create DataFrame and write to Excel
+                df = pd.DataFrame(rows)
+                df.to_excel(writer, sheet_name=sheet_name, index=False)
+                
+                # Adjust column widths
+                worksheet = writer.sheets[sheet_name]
+                for idx, col in enumerate(df.columns):
+                    max_length = max(
+                        df[col].astype(str).apply(len).max(),
+                        len(str(col))
+                    ) + 2
+                    worksheet.set_column(idx, idx, min(max_length, 50))
+                
     def _process_section_data(self, section_name: str, entities: List[Dict], fields: Union[List[str], Dict]) -> pd.DataFrame:
         """
         Process section data into a DataFrame with hierarchical structure
