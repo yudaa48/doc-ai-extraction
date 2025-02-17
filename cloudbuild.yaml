@@ -1,0 +1,39 @@
+steps:
+# Build the Docker image
+- name: 'us-central1-docker.pkg.dev/cloud-builders/docker'
+  args: ['build', '-t', '${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPOSITORY}/${_SERVICE_NAME}', '.']
+
+# Push the image to Artifact Registry
+- name: 'us-central1-docker.pkg.dev/cloud-builders/docker'
+  args: ['push', '${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPOSITORY}/${_SERVICE_NAME}']
+
+# Deploy to Cloud Run
+- name: 'gcr.io/google.com/cloudrun/deploy'
+  args:
+  - '${_SERVICE_NAME}'
+  - '--image'
+  - '${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPOSITORY}/${_SERVICE_NAME}'
+  - '--region'
+  - '${_REGION}'
+  - '--platform'
+  - 'managed'
+  - '--service-account'
+  - '${_SERVICE_ACCOUNT}'
+  - '--allow-unauthenticated'
+  - '--memory'
+  - '4Gi'
+  - '--cpu'
+  - '2'
+  - '--timeout'
+  - '900'
+  - '--max-instances'
+  - '10'
+
+substitutions:
+  _REGION: us-central1
+  _REPOSITORY: doc-ai-extraction
+  _SERVICE_NAME: doc-ai-extraction
+  _SERVICE_ACCOUNT: document-ai@neon-camp-449123-j1.iam.gserviceaccount.com
+
+images:
+- '${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPOSITORY}/${_SERVICE_NAME}'
