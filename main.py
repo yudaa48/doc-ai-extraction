@@ -5,6 +5,7 @@ import os
 import shutil
 import PyPDF2
 import io
+import time
 from google.cloud import storage, documentai
 from google.api_core.client_options import ClientOptions
 from typing import Dict, Any, Optional, List, Union, Union
@@ -350,226 +351,387 @@ class DocumentAIProcessor:
             st.error(f"JSON Save Error: {str(e)}")
             raise
 
-    def save_excel_to_gcs(self, bucket_name: str, data: Dict[str, Any], filename: str, prefix: str = '') -> str:
-        """Save hierarchical data to Excel with multiple sheets"""
-        try:
-            # Create Excel writer with xlsxwriter engine
-            with pd.ExcelWriter('temp_output.xlsx', engine='xlsxwriter') as writer:
-                # Process each page
-                for page_num, page in enumerate(data.get("pages", []), 1):
-                    # Tracking unique identifiers for sections
-                    section_unique_trackers = {}
-                    
-                    # Process each section in the page
-                    for parent_type, parent_entities in page.get("hierarchical_fields", {}).items():
-                        # Special handling for multiple vehicle_driver_persons
-                        if parent_type == 'vehicle_driver_persons':
-                            # Create a separate sheet for each parent entity
-                            for parent_idx, parent_entity in enumerate(parent_entities, 1):
-                                # Create unique sheet name
-                                sheet_name = f"P{page_num}_vehicle_driver_{parent_idx}"
-                                
-                                # Prepare data for this section
-                                rows = []
-                                
-                                # Add parent information
-                                parent_row = {
-                                    "Page": page_num,
-                                    "Level": "Parent",
-                                    "Type": parent_type,
-                                    "Value": parent_entity.get('value', ''),
-                                    "Confidence": parent_entity.get('confidence', 0)
-                                }
-                                rows.append(parent_row)
-                                
-                                # Process child fields
-                                for child_type, child_entries in parent_entity.get("child_fields", {}).items():
-                                    # If this is person_num, track its entries
-                                    if child_type == 'person_num':
-                                        for person_idx, child_entry in enumerate(child_entries, 1):
-                                            # Add a header row for each person
-                                            person_header_row = {
-                                                "Page": page_num,
-                                                "Level": "Person Header",
-                                                "Type": f"Person {person_idx}",
-                                                "Value": f"Person {person_idx} Details",
-                                                "Confidence": ""
-                                            }
-                                            rows.append(person_header_row)
-                                            
-                                            # Add child information
-                                            child_row = {
-                                                "Page": page_num,
-                                                "Level": "Child",
-                                                "Type": child_type,
-                                                "Value": child_entry.get('value', ''),
-                                                "Confidence": child_entry.get('confidence', 0)
-                                            }
-                                            rows.append(child_row)
-                                            
-                                            # Process entities for this person
-                                            for entity in child_entry.get("entities", []):
-                                                entity_row = {
-                                                    "Page": page_num,
-                                                    "Level": "Entity",
-                                                    "Type": entity.get('type', ''),
-                                                    "Value": entity.get('value', ''),
-                                                    "Confidence": entity.get('confidence', 0)
-                                                }
-                                                rows.append(entity_row)
-                                            
-                                            # Add a separator row after each person's details
-                                            separator_row = {
-                                                "Page": page_num,
-                                                "Level": "Separator",
-                                                "Type": "",
-                                                "Value": "",
-                                                "Confidence": ""
-                                            }
-                                            rows.append(separator_row)
-                                    
-                                    # For other child types, process normally
-                                    else:
-                                        for child_entry in child_entries:
-                                            # Add child information
-                                            child_row = {
-                                                "Page": page_num,
-                                                "Level": "Child",
-                                                "Type": child_type,
-                                                "Value": child_entry.get('value', ''),
-                                                "Confidence": child_entry.get('confidence', 0)
-                                            }
-                                            rows.append(child_row)
-                                            
-                                            # Process entities
-                                            for entity in child_entry.get("entities", []):
-                                                entity_row = {
-                                                    "Page": page_num,
-                                                    "Level": "Entity",
-                                                    "Type": entity.get('type', ''),
-                                                    "Value": entity.get('value', ''),
-                                                    "Confidence": entity.get('confidence', 0)
-                                                }
-                                                rows.append(entity_row)
-                                
-                                if rows:
-                                    # Create DataFrame and write to Excel
-                                    df = pd.DataFrame(rows)
-                                    df.to_excel(writer, sheet_name=sheet_name, index=False)
-                                    
-                                    # Adjust column widths
-                                    worksheet = writer.sheets[sheet_name]
-                                    for idx, col in enumerate(df.columns):
-                                        max_length = max(
-                                            df[col].astype(str).apply(len).max(),
-                                            len(str(col))
-                                        ) + 2
-                                        worksheet.set_column(idx, idx, min(max_length, 50))
-                                    
-                                    # Format header and separator rows
-                                    workbook = writer.book
-                                    header_format = workbook.add_format({
-                                        'bold': True, 
-                                        'bg_color': '#D3D3D3',  # Light gray background
-                                        'align': 'center'
-                                    })
-                                    
-                                    separator_format = workbook.add_format({
-                                        'bottom': 1,  # Bottom border
-                                        'bottom_color': 'black'
-                                    })
-                                    
-                                    # Find and format header and separator rows
-                                    for row_idx, row in enumerate(rows, 1):  # Excel rows are 1-indexed
-                                        if row.get('Level') == 'Person Header':
-                                            worksheet.set_row(row_idx, None, header_format)
-                                        elif row.get('Level') == 'Separator':
-                                            worksheet.set_row(row_idx, None, separator_format)
+    def debug_print_hierarchical_fields(data):
+    """
+    Comprehensive debug print of hierarchical fields
+    
+    Args:
+        data (Dict[str, Any]): Document data to debug print
+    """
+    import json
+    
+    def safe_print(section_name, section_data):
+        print(f"\n{'='*20} {section_name} {'='*20}")
+        if section_data:
+            # Use json.dumps for better readability
+            print(json.dumps(section_data, indent=2))
+        else:
+            print("No data found for this section")
+    
+    # Print hierarchical fields for each page
+    for page_idx, page in enumerate(data.get("pages", []), 1):
+        print(f"\n{'#'*30} PAGE {page_idx} {'#'*30}")
+        
+        hierarchical_fields = page.get("hierarchical_fields", {})
+        
+        # List of sections to check
+        sections_to_check = [
+            "charges", 
+            "disposition_of_injured_killed", 
+            "factors_conditions", 
+            "vehicle_driver_persons"
+        ]
+        
+        for section in sections_to_check:
+            section_data = hierarchical_fields.get(section, [])
+            safe_print(section.upper(), section_data)
+
+    def advanced_entity_mapping(data):
+        """
+        Advanced entity mapping with comprehensive debugging
+        
+        Args:
+            data (Dict[str, Any]): Document data to process
+        
+        Returns:
+            Dict[str, Dict]: Mapped entities by unit number
+        """
+        # Initialize debug logging
+        print("\n{'='*20} ADVANCED ENTITY MAPPING {'='*20}")
+        
+        # Mapping to store entities by unit
+        unit_mapping = {}
+        
+        # Process each page
+        for page_idx, page in enumerate(data.get("pages", []), 1):
+            print(f"\n{'#'*30} PAGE {page_idx} {'#'*30}")
+            
+            # Get hierarchical fields
+            hierarchical_fields = page.get("hierarchical_fields", {})
+            
+            # Find vehicle and driver information to get unit numbers
+            vdp_sections = hierarchical_fields.get("vehicle_driver_persons", [])
+            
+            # Extract unit numbers and driver names
+            for unit_entry in vdp_sections:
+                # Find unit number
+                unit_num = None
+                driver_name = "Unknown Driver"
+                
+                # Try to extract unit number
+                for child_type, child_fields in unit_entry.get("child_fields", {}).items():
+                    for child_field in child_fields:
+                        for entity in child_field.get("entities", []):
+                            if entity.get("type") == "unit_num" and entity.get("value"):
+                                unit_num = entity["value"]
+                                break
                         
-                        # Handle other section types
-                        else:
-                            if parent_type not in section_unique_trackers:
-                                section_unique_trackers[parent_type] = 0
-                            section_unique_trackers[parent_type] += 1
+                        # Try to find driver name
+                        if not driver_name or driver_name == "Unknown Driver":
+                            for entity in child_field.get("entities", []):
+                                if entity.get("type") == "person_name":
+                                    driver_name = entity["value"]
+                                    break
+                        
+                        if unit_num and driver_name != "Unknown Driver":
+                            break
+                    
+                    if unit_num and driver_name != "Unknown Driver":
+                        break
+                
+                # Skip if no unit number found
+                if not unit_num:
+                    print(f"WARNING: No unit number found for entry: {unit_entry}")
+                    continue
+                
+                # Initialize unit mapping
+                if unit_num not in unit_mapping:
+                    unit_mapping[unit_num] = {
+                        "driver_name": driver_name,
+                        "charges": [],
+                        "disposition": [],
+                        "factors": []
+                    }
+                
+                # Map Charges
+                charges_sections = hierarchical_fields.get("charges", [])
+                for charge_entry in charges_sections:
+                    for child_type, child_fields in charge_entry.get("child_fields", {}).items():
+                        for child_field in child_fields:
+                            entities = child_field.get("entities", [])
+                            # Look for matching unit number in entities
+                            matching_unit = any(
+                                entity.get("type") in ["unit_num_charges", "unit_num_contributing"] and 
+                                entity.get("value") == unit_num 
+                                for entity in entities
+                            )
                             
-                            # Create unique sheet name
-                            sheet_suffix = section_unique_trackers[parent_type]
-                            sheet_name = f"P{page_num}_{parent_type}_{sheet_suffix}"
+                            if matching_unit:
+                                # Extract all charge-related entities
+                                for entity in entities:
+                                    if entity.get("type") == "charge":
+                                        unit_mapping[unit_num]["charges"].append({
+                                            "value": entity.get("value", ""),
+                                            "confidence": entity.get("confidence", 0)
+                                        })
+                
+                # Map Disposition
+                disposition_sections = hierarchical_fields.get("disposition_of_injured_killed", [])
+                for disposition_entry in disposition_sections:
+                    for child_type, child_fields in disposition_entry.get("child_fields", {}).items():
+                        for child_field in child_fields:
+                            entities = child_field.get("entities", [])
+                            # Look for matching unit number in entities
+                            matching_unit = any(
+                                entity.get("type") in ["unit_num_disp"] and 
+                                entity.get("value") == unit_num 
+                                for entity in entities
+                            )
                             
-                            # Truncate to valid Excel sheet name (max 31 characters)
-                            sheet_name = sheet_name[:31]
-                            
-                            # Prepare data for this section
-                            rows = []
-                            for parent_entity in parent_entities:
-                                # Add parent information
-                                parent_row = {
-                                    "Page": page_num,
-                                    "Level": "Parent",
-                                    "Type": parent_type,
-                                    "Value": parent_entity.get('value', ''),
-                                    "Confidence": parent_entity.get('confidence', 0)
-                                }
-                                rows.append(parent_row)
+                            if matching_unit:
+                                # Extract disposition details
+                                disposition_details = {}
+                                for entity in entities:
+                                    if entity.get("type") in ["taken_to", "taken_by"]:
+                                        disposition_details[entity["type"]] = entity.get("value", "")
                                 
-                                # Process child fields
-                                for child_type, child_entries in parent_entity.get("child_fields", {}).items():
-                                    for child_entry in child_entries:
-                                        # Add child information
-                                        child_row = {
-                                            "Page": page_num,
-                                            "Level": "Child",
-                                            "Type": child_type,
-                                            "Value": child_entry.get('value', ''),
-                                            "Confidence": child_entry.get('confidence', 0)
-                                        }
-                                        rows.append(child_row)
-                                        
-                                        # Process entities
-                                        for entity in child_entry.get("entities", []):
-                                            entity_row = {
-                                                "Page": page_num,
-                                                "Level": "Entity",
-                                                "Type": entity.get('type', ''),
-                                                "Value": entity.get('value', ''),
-                                                "Confidence": entity.get('confidence', 0)
-                                            }
-                                            rows.append(entity_row)
+                                unit_mapping[unit_num]["disposition"].append(disposition_details)
+                
+                # Map Factors
+                factors_sections = hierarchical_fields.get("factors_conditions", [])
+                for factor_entry in factors_sections:
+                    for child_type, child_fields in factor_entry.get("child_fields", {}).items():
+                        for child_field in child_fields:
+                            entities = child_field.get("entities", [])
+                            # Look for matching unit number in entities
+                            matching_unit = any(
+                                entity.get("type") in ["unit_num_contributing"] and 
+                                entity.get("value") == unit_num 
+                                for entity in entities
+                            )
                             
-                            if rows:
-                                # Create DataFrame and write to Excel
-                                df = pd.DataFrame(rows)
-                                df.to_excel(writer, sheet_name=sheet_name, index=False)
-                                
-                                # Adjust column widths
-                                worksheet = writer.sheets[sheet_name]
-                                for idx, col in enumerate(df.columns):
-                                    max_length = max(
-                                        df[col].astype(str).apply(len).max(),
-                                        len(str(col))
-                                    ) + 2
-                                    worksheet.set_column(idx, idx, min(max_length, 50))
+                            if matching_unit:
+                                # Extract factor details
+                                for entity in entities:
+                                    if entity.get("type") in [
+                                        "contributing_contributing_factors", 
+                                        "weather_cond", 
+                                        "roadway_type", 
+                                        "traffic_control"
+                                    ]:
+                                        unit_mapping[unit_num]["factors"].append({
+                                            "type": entity.get("type", ""),
+                                            "value": entity.get("value", ""),
+                                            "confidence": entity.get("confidence", 0)
+                                        })
+        
+        # Print mapped results for debugging
+        print("\n{'='*20} MAPPED RESULTS {'='*20}")
+        for unit, details in unit_mapping.items():
+            print(f"\nUnit {unit} - {details['driver_name']}")
+            print("Charges:", details["charges"])
+            print("Disposition:", details["disposition"])
+            print("Factors:", details["factors"])
+        
+        return unit_mapping
+
+    def save_excel_to_gcs(self, bucket_name: str, data: Dict[str, Any], filename: str, prefix: str = '') -> str:
+        """
+        Save hierarchical data to Excel with improved unit-based mapping
+        """
+        try:
+            # Debug print of hierarchical fields
+            debug_print_hierarchical_fields(data)
             
-            # Upload to GCS
-            bucket_name = bucket_name.replace('gs://', '')
-            bucket = self.storage_client.bucket(bucket_name)
+            # Advanced entity mapping
+            unit_mapping = advanced_entity_mapping(data)
             
-            full_blob_path = f"{prefix}/{filename}" if prefix else filename
-            full_blob_path = full_blob_path.replace('//', '/')
+            # Ensure temp directory exists
+            temp_dir = 'temp_excel_files'
+            os.makedirs(temp_dir, exist_ok=True)
             
-            blob = bucket.blob(full_blob_path)
-            blob.upload_from_filename('temp_output.xlsx')
+            # Create a temporary file with a unique name
+            temp_file = os.path.join(temp_dir, f'temp_{int(time.time())}.xlsx')
             
-            # Clean up temporary file
-            os.remove('temp_output.xlsx')
-            
-            return f"gs://{bucket_name}/{full_blob_path}"
-            
+            # Create Excel writer with proper mode and engine
+            with pd.ExcelWriter(
+                temp_file,
+                engine='xlsxwriter',
+                mode='w',
+                engine_kwargs={'options': {'strings_to_urls': False}}
+            ) as writer:
+                workbook = writer.book
+                
+                # Create formats for styling
+                header_format = workbook.add_format({
+                    'bold': True,
+                    'bg_color': '#D3D3D3',
+                    'align': 'center'
+                })
+                
+                section_format = workbook.add_format({
+                    'bold': True,
+                    'bg_color': '#E6E6FA',
+                    'align': 'left'
+                })
+                
+                # Process each unit in the mapping
+                for unit_num, unit_data in unit_mapping.items():
+                    # Create sheet name
+                    sheet_name = f"Unit {unit_num} - {unit_data['driver_name']}"[:31]  # Excel limit
+                    
+                    # Initialize rows for this unit's data
+                    unit_rows = []
+                    
+                    # Unit Information
+                    unit_rows.append({
+                        "Section": "Unit Information",
+                        "Field": "Unit Number",
+                        "Value": unit_num,
+                        "Additional Info": ""
+                    })
+                    
+                    # Charges Section
+                    unit_rows.append({
+                        "Section": "Charges Information",
+                        "Field": "",
+                        "Value": "",
+                        "Additional Info": ""
+                    })
+                    
+                    if unit_data['charges']:
+                        for charge in unit_data['charges']:
+                            unit_rows.append({
+                                "Section": "Charges Information",
+                                "Field": "Charge",
+                                "Value": charge.get('value', 'Unknown Charge'),
+                                "Additional Info": f"Confidence: {charge.get('confidence', 0):.2%}"
+                            })
+                    else:
+                        unit_rows.append({
+                            "Section": "Charges Information",
+                            "Field": "No Charges",
+                            "Value": "None",
+                            "Additional Info": ""
+                        })
+                    
+                    # Disposition Section
+                    unit_rows.append({
+                        "Section": "Disposition Information",
+                        "Field": "",
+                        "Value": "",
+                        "Additional Info": ""
+                    })
+                    
+                    if unit_data['disposition']:
+                        for disposition in unit_data['disposition']:
+                            unit_rows.append({
+                                "Section": "Disposition Information",
+                                "Field": "Disposition Details",
+                                "Value": disposition.get('taken_to', 'N/A'),
+                                "Additional Info": f"Taken by: {disposition.get('taken_by', 'N/A')}"
+                            })
+                    else:
+                        unit_rows.append({
+                            "Section": "Disposition Information",
+                            "Field": "No Disposition",
+                            "Value": "None",
+                            "Additional Info": ""
+                        })
+                    
+                    # Factors & Conditions Section
+                    unit_rows.append({
+                        "Section": "Factors & Conditions",
+                        "Field": "",
+                        "Value": "",
+                        "Additional Info": ""
+                    })
+                    
+                    if unit_data['factors']:
+                        for factor in unit_data['factors']:
+                            unit_rows.append({
+                                "Section": "Factors & Conditions",
+                                "Field": factor.get('type', 'Unknown Factor').replace('_', ' ').title(),
+                                "Value": factor.get('value', 'N/A'),
+                                "Additional Info": f"Confidence: {factor.get('confidence', 0):.2%}"
+                            })
+                    else:
+                        unit_rows.append({
+                            "Section": "Factors & Conditions",
+                            "Field": "No Factors",
+                            "Value": "None",
+                            "Additional Info": ""
+                        })
+                    
+                    # Create DataFrame and write to Excel
+                    df = pd.DataFrame(unit_rows)
+                    df.to_excel(writer, sheet_name=sheet_name, index=False)
+                    
+                    # Format the worksheet
+                    worksheet = writer.sheets[sheet_name]
+                    
+                    # Set column widths
+                    worksheet.set_column('A:A', 20)  # Section
+                    worksheet.set_column('B:B', 25)  # Field
+                    worksheet.set_column('C:C', 30)  # Value
+                    worksheet.set_column('D:D', 40)  # Additional Info
+                    
+                    # Add header formatting
+                    for col_num, value in enumerate(df.columns.values):
+                        worksheet.write(0, col_num, value, header_format)
+                    
+                    # Add section formatting
+                    for row_num, value in enumerate(df['Section']):
+                        if value and not df['Field'].iloc[row_num]:
+                            worksheet.write_row(row_num + 1, 0, [value, '', '', ''], section_format)
+                
+                # Ensure writer is properly closed
+                writer.close()
+                
+                # Rest of the method remains the same as in previous implementation
+                # (Upload to GCS, cleanup, etc.)
+                
+                # Verify the file was created successfully
+                if not os.path.exists(temp_file) or os.path.getsize(temp_file) == 0:
+                    raise ValueError("Excel file was not created successfully")
+                    
+                # Upload to GCS with proper content type
+                try:
+                    bucket_name = bucket_name.replace('gs://', '')
+                    bucket = self.storage_client.bucket(bucket_name)
+                    
+                    full_blob_path = f"{prefix}/{filename}" if prefix else filename
+                    full_blob_path = full_blob_path.replace('//', '/')
+                    
+                    blob = bucket.blob(full_blob_path)
+                    blob.upload_from_filename(
+                        temp_file,
+                        content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+                    )
+                finally:
+                    # Clean up temporary files
+                    try:
+                        os.remove(temp_file)
+                        os.rmdir(temp_dir)
+                    except Exception as cleanup_error:
+                        print(f"Warning: Cleanup error: {cleanup_error}")
+                    
+                    return f"gs://{bucket_name}/{full_blob_path}"
+                    
         except Exception as e:
             st.error(f"Excel Save Error: {str(e)}")
-            # Clean up temp file if it exists
-            if os.path.exists('temp_output.xlsx'):
-                os.remove('temp_output.xlsx')
+            # Clean up temp directory and files
+            try:
+                temp_dir = 'temp_excel_files'
+                if os.path.exists(temp_dir):
+                    for temp_file in os.listdir(temp_dir):
+                        try:
+                            os.remove(os.path.join(temp_dir, temp_file))
+                        except Exception:
+                            pass
+                    os.rmdir(temp_dir)
+            except Exception:
+                pass
             raise
 
     def _process_section_data(self, section_name: str, entities: List[Dict], fields: Union[List[str], Dict]) -> pd.DataFrame:
