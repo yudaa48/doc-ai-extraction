@@ -5,6 +5,7 @@ import os
 import shutil
 import PyPDF2
 import io
+import re
 from google.cloud import storage, documentai
 from google.api_core.client_options import ClientOptions
 from typing import Dict, Any, Optional, List, Union, Union
@@ -349,226 +350,325 @@ class DocumentAIProcessor:
         except Exception as e:
             st.error(f"JSON Save Error: {str(e)}")
             raise
+    
+    def _process_person_details_for_excel(self, page_num, person_entries) -> List[Dict]:
+        """
+        Process person details for Excel output with expanded fields and decoded values
+        
+        Args:
+            page_num (int): Page number
+            person_entries (List[Dict]): List of person entries
+        
+        Returns:
+            List of processed rows for Excel output
+        """
+        rows = []
+        
+        for person_entry in person_entries:
+            # Create a processor to handle detailed description parsing
+            processor = CrashReportDataProcessor()
+            
+            # Process each entity in the person entry
+            basic_info = {
+                'name': '',
+                'type': '',
+                'person_num1': '',
+                'seat_position': ''
+            }
+            description_details = None
+            
+            for entity in person_entry.get('entities', []):
+                # Basic person information
+                if entity['type'] == 'person_name':
+                    basic_info['name'] = entity['value']
+                
+                if entity['type'] == 'person_type':
+                    # Get both original and decoded values
+                    original_type = entity['value']
+                    basic_info['type'] = {
+                        'original': original_type,
+                        'decoded': processor.data_dict.get_description('PERSON_TYPE', original_type)
+                    }
+                
+                if entity['type'] == 'person_num1':
+                    basic_info['person_num1'] = entity['value']
+                
+                if entity['type'] == 'person_seat_position':
+                    basic_info['seat_position'] = entity['value']
+                
+                # Detailed person description processing
+                if entity['type'] == 'person_description':
+                    description_details = processor.extract_person_description(entity['value'])
+            
+            # Create rows for basic information
+            basic_rows = []
+            for key, value in basic_info.items():
+                # Special handling for type to show both original and decoded
+                if key == 'type' and isinstance(value, dict):
+                    basic_rows.append({
+                        "Page": page_num,
+                        "Level": "Person",
+                        "Type": "Person Type",
+                        "Value": value['original'],
+                        "Decoded Value": value['decoded'],
+                        "Raw Value": "",
+                        "Confidence": f"{entity.get('confidence', 0):.2%}"
+                    })
+                else:
+                    basic_rows.append({
+                        "Page": page_num,
+                        "Level": "Person",
+                        "Type": key.replace('_', ' ').title(),
+                        "Value": value,
+                        "Decoded Value": "",
+                        "Raw Value": "",
+                        "Confidence": f"{entity.get('confidence', 0):.2%}"
+                    })
+            rows.extend(basic_rows)
+            
+            # Process detailed description if available
+            if description_details:
+                # Mapping of description fields to more readable names and decode methods
+                description_field_mappings = {
+                    'injury_severity': ('INJURY_SEVERITY', 'Injury Severity'),
+                    'age': (None, 'Age'),
+                    'ethnicity': ('ETHNICITY', 'Ethnicity'),
+                    'sex': ('SEX_CODES', 'Sex'),
+                    'eject': ('EJECT_CODES', 'Eject Status'),
+                    'restr': ('RESTRAINT_CODES', 'Restraint'),
+                    'airbag': ('AIRBAG_CODES', 'Airbag Status'),
+                    'helmet': ('HELMET_CODES', 'Helmet Status'),
+                    'sol': ('SOBRIETY_CODES', 'Sobriety of Last Drink'),
+                    'alc_spec': ('SUBSTANCE_SPEC_CODES', 'Alcohol Specification'),
+                    'alc_result': ('SUBSTANCE_RESULT_CODES', 'Alcohol Result'),
+                    'drug_spec': ('SUBSTANCE_SPEC_CODES', 'Drug Specification'),
+                    'drug_result': ('SUBSTANCE_RESULT_CODES', 'Drug Result'),
+                    'drug_category': ('SUBSTANCE_SPEC_CODES', 'Drug Category')
+                }
+                
+                # Create rows for each description detail
+                description_rows = []
+                for key, value in description_details.items():
+                    # Get decode method and display name
+                    decode_method, display_name = description_field_mappings.get(key, (None, key.replace('_', ' ').title()))
+                    
+                    # Decode if possible
+                    decoded_value = ''
+                    if decode_method and hasattr(processor.data_dict, decode_method):
+                        code_dict = getattr(processor.data_dict, decode_method)
+                        decoded_value = code_dict.get(str(value), value)
+                    
+                    description_rows.append({
+                        "Page": page_num,
+                        "Level": "Person Description",
+                        "Type": display_name,
+                        "Value": value,
+                        "Decoded Value": decoded_value,
+                        "Raw Value": "",
+                        "Confidence": ""
+                    })
+                
+                rows.extend(description_rows)
+            
+            # Add a separator row
+            rows.append({
+                "Page": page_num,
+                "Level": "Separator",
+                "Type": "",
+                "Value": "",
+                "Decoded Value": "",
+                "Raw Value": "",
+                "Confidence": ""
+            })
+        
+        return rows
 
     def save_excel_to_gcs(self, bucket_name: str, data: Dict[str, Any], filename: str, prefix: str = '') -> str:
-        """Save hierarchical data to Excel with multiple sheets and organized location sections"""
+        """Save crash report data to Excel with enhanced processing"""
         try:
+            # Initialize processors
+            processor = CrashReportDataProcessor()
+            checkbox_processor = CheckboxProcessor()
+            section_unique_trackers = {}
+            
             # Create Excel writer with xlsxwriter engine
             with pd.ExcelWriter('temp_output.xlsx', engine='xlsxwriter') as writer:
+                workbook = writer.book
+                
                 # Process each page
                 for page in data.get("pages", []):
                     page_num = page["page_number"]
+                    hierarchical_fields = page.get("hierarchical_fields", {})
                     
-                    # Process identification_location sections
-                    id_locations = page.get("hierarchical_fields", {}).get("identification_location", [])
-                    if id_locations:
-                        sheet_name = f"P{page_num}_identification_location"[:31]
+                    # Process sections in a specific order
+                    section_order = [
+                        'identification_location', 
+                        'vehicle_driver_persons', 
+                        'factors_conditions', 
+                        'charges', 
+                        'damage', 
+                        'disposition_of_injured_killed', 
+                        'investigator', 
+                        'narrative'
+                    ]
+                    
+                    for section_type in section_order:
+                        section_data = hierarchical_fields.get(section_type, [])
+                        
+                        if not section_data:
+                            continue
+                        
+                        # Increment section tracker
+                        if section_type not in section_unique_trackers:
+                            section_unique_trackers[section_type] = 0
+                        section_unique_trackers[section_type] += 1
+                        
+                        # Generate sheet name
+                        sheet_name = f"P{page_num}_{section_type}_{section_unique_trackers[section_type]}"[:31]
                         rows = []
                         
-                        # Process each identification_location section
-                        section_names = ["General Information", "Road of Crash", "Intersecting Road"]
+                        # Specific processing for each section type
+                        if section_type == 'identification_location':
+                            for location in section_data:
+                                # Process each child field
+                                for field_type, field_entries in location.get("child_fields", {}).items():
+                                    for entry in field_entries:
+                                        # Process checkbox values
+                                        processed_value = checkbox_processor.process_json_field(entry)
+                                        
+                                        rows.append({
+                                            "Page": page_num,
+                                            "Level": "Field",
+                                            "Type": field_type,
+                                            "Value": processed_value.get('value', ''),
+                                            "Raw Value": processed_value.get('raw_value', ''),
+                                            "Confidence": f"{processed_value.get('confidence', 0):.2%}"
+                                        })
                         
-                        for idx, location in enumerate(id_locations):
-                            # Add section header
-                            if idx < len(section_names):
-                                section_header = {
-                                    "Page": page_num,
-                                    "Level": "Section Header",
-                                    "Type": section_names[idx],
-                                    "Value": "",
-                                    "Confidence": ""
-                                }
-                                rows.append(section_header)
-                            
-                            # Process fields within each section
-                            for field_type, field_entries in location.get("child_fields", {}).items():
-                                for entry in field_entries:
-                                    field_row = {
-                                        "Page": page_num,
-                                        "Level": "Field",
-                                        "Type": field_type,
-                                        "Value": entry.get('value', ''),
-                                        "Confidence": f"{entry.get('confidence', 0):.2%}"
-                                    }
-                                    rows.append(field_row)
-                            
-                            # Add separator after each section
-                            separator_row = {
-                                "Page": page_num,
-                                "Level": "Separator",
-                                "Type": "",
-                                "Value": "",
-                                "Confidence": ""
-                            }
-                            rows.append(separator_row)
-                        
-                        if rows:
-                            df = pd.DataFrame(rows)
-                            df.to_excel(writer, sheet_name=sheet_name, index=False)
-                            
-                            # Format the worksheet
-                            worksheet = writer.sheets[sheet_name]
-                            workbook = writer.book
-                            
-                            # Create formats
-                            header_format = workbook.add_format({
-                                'bold': True,
-                                'bg_color': '#D3D3D3',
-                                'align': 'center'
-                            })
-                            
-                            separator_format = workbook.add_format({
-                                'bottom': 1
-                            })
-                            
-                            # Apply formats
-                            for row_idx, row in enumerate(rows, 1):
-                                if row.get('Level') == 'Section Header':
-                                    worksheet.set_row(row_idx, None, header_format)
-                                elif row.get('Level') == 'Separator':
-                                    worksheet.set_row(row_idx, None, separator_format)
-                            
-                            # Adjust column widths
-                            self._adjust_column_widths(writer, sheet_name, df)
-                    
-                    # Process other sections (vehicle_driver_persons, etc.)
-                    for parent_type, parent_entities in page.get("hierarchical_fields", {}).items():
-                        # Skip identification_location as it's already processed
-                        if parent_type == 'identification_location':
-                            continue
-                            
-                        # Tracking unique identifiers for sections
-                        section_unique_trackers = {}
-                        
-                        if parent_type == 'vehicle_driver_persons':
-                            # Create a separate sheet for each parent entity
-                            for parent_idx, parent_entity in enumerate(parent_entities, 1):
-                                sheet_name = f"P{page_num}_vehicle_driver_{parent_idx}"[:31]
-                                rows = []
-                                
+                        elif section_type == 'vehicle_driver_persons':
+                            # Process person details
+                            for parent_idx, parent_entity in enumerate(section_data, 1):
                                 # Add parent information
-                                parent_row = {
+                                parent_proc = checkbox_processor.process_json_field(parent_entity)
+                                rows.append({
                                     "Page": page_num,
                                     "Level": "Parent",
-                                    "Type": parent_type,
-                                    "Value": parent_entity.get('value', ''),
-                                    "Confidence": f"{parent_entity.get('confidence', 0):.2%}"
-                                }
-                                rows.append(parent_row)
+                                    "Type": parent_proc.get('type', ''),
+                                    "Value": parent_proc.get('value', ''),
+                                    "Raw Value": parent_proc.get('raw_value', ''),
+                                    "Confidence": f"{parent_proc.get('confidence', 0):.2%}"
+                                })
                                 
                                 # Process child fields
                                 for child_type, child_entries in parent_entity.get("child_fields", {}).items():
                                     if child_type == 'person_num':
                                         for person_idx, child_entry in enumerate(child_entries, 1):
                                             # Add person header
-                                            person_header_row = {
+                                            rows.append({
                                                 "Page": page_num,
                                                 "Level": "Person Header",
                                                 "Type": f"Person {person_idx}",
                                                 "Value": f"Person {person_idx} Details",
+                                                "Raw Value": "",
                                                 "Confidence": ""
-                                            }
-                                            rows.append(person_header_row)
+                                            })
                                             
                                             # Process person entities
                                             for entity in child_entry.get("entities", []):
-                                                entity_row = {
+                                                proc_entity = checkbox_processor.process_json_field(entity)
+                                                rows.append({
                                                     "Page": page_num,
                                                     "Level": "Entity",
-                                                    "Type": entity.get('type', ''),
-                                                    "Value": entity.get('value', ''),
-                                                    "Confidence": f"{entity.get('confidence', 0):.2%}"
-                                                }
-                                                rows.append(entity_row)
-                                            
-                                            # Add separator
-                                            rows.append({
-                                                "Page": page_num,
-                                                "Level": "Separator",
-                                                "Type": "",
-                                                "Value": "",
-                                                "Confidence": ""
-                                            })
+                                                    "Type": proc_entity.get('type', ''),
+                                                    "Value": proc_entity.get('value', ''),
+                                                    "Raw Value": proc_entity.get('raw_value', ''),
+                                                    "Confidence": f"{proc_entity.get('confidence', 0):.2%}"
+                                                })
+                                    
                                     else:
-                                        # Process other child fields
                                         for child_entry in child_entries:
-                                            child_row = {
+                                            proc_child = checkbox_processor.process_json_field(child_entry)
+                                            rows.append({
                                                 "Page": page_num,
                                                 "Level": "Child",
                                                 "Type": child_type,
-                                                "Value": child_entry.get('value', ''),
-                                                "Confidence": f"{child_entry.get('confidence', 0):.2%}"
-                                            }
-                                            rows.append(child_row)
-                                
-                                if rows:
-                                    df = pd.DataFrame(rows)
-                                    df.to_excel(writer, sheet_name=sheet_name, index=False)
-                                    
-                                    # Format worksheet
-                                    worksheet = writer.sheets[sheet_name]
-                                    workbook = writer.book
-                                    header_format = workbook.add_format({
-                                        'bold': True,
-                                        'bg_color': '#D3D3D3',
-                                        'align': 'center'
-                                    })
-                                    
-                                    separator_format = workbook.add_format({
-                                        'bottom': 1
-                                    })
-                                    
-                                    for row_idx, row in enumerate(rows, 1):
-                                        if row.get('Level') == 'Person Header':
-                                            worksheet.set_row(row_idx, None, header_format)
-                                        elif row.get('Level') == 'Separator':
-                                            worksheet.set_row(row_idx, None, separator_format)
-                                    
-                                    self._adjust_column_widths(writer, sheet_name, df)
-                        else:
-                            # Handle other section types
-                            if parent_type not in section_unique_trackers:
-                                section_unique_trackers[parent_type] = 0
-                            section_unique_trackers[parent_type] += 1
-                            
-                            sheet_name = f"P{page_num}_{parent_type}_{section_unique_trackers[parent_type]}"[:31]
-                            rows = []
-                            
-                            for parent_entity in parent_entities:
-                                parent_row = {
+                                                "Value": proc_child.get('value', ''),
+                                                "Raw Value": proc_child.get('raw_value', ''),
+                                                "Confidence": f"{proc_child.get('confidence', 0):.2%}"
+                                            })
+                        
+                        elif section_type == 'factors_conditions':
+                            for entity in section_data:
+                                # Add overall section entity
+                                parent_proc = checkbox_processor.process_json_field(entity)
+                                rows.append({
                                     "Page": page_num,
                                     "Level": "Parent",
-                                    "Type": parent_type,
-                                    "Value": parent_entity.get('value', ''),
-                                    "Confidence": f"{parent_entity.get('confidence', 0):.2%}"
-                                }
-                                rows.append(parent_row)
+                                    "Type": section_type,
+                                    "Value": parent_proc.get('value', ''),
+                                    "Raw Value": parent_proc.get('raw_value', ''),
+                                    "Confidence": f"{parent_proc.get('confidence', 0):.2%}"
+                                })
                                 
-                                for child_type, child_entries in parent_entity.get("child_fields", {}).items():
+                                # Process child fields
+                                for child_type, child_entries in entity.get("child_fields", {}).items():
                                     for child_entry in child_entries:
-                                        child_row = {
+                                        proc_child = checkbox_processor.process_json_field(child_entry)
+                                        rows.append({
                                             "Page": page_num,
                                             "Level": "Child",
                                             "Type": child_type,
-                                            "Value": child_entry.get('value', ''),
-                                            "Confidence": f"{child_entry.get('confidence', 0):.2%}"
-                                        }
-                                        rows.append(child_row)
-                                        
-                                        for entity in child_entry.get("entities", []):
-                                            entity_row = {
-                                                "Page": page_num,
-                                                "Level": "Entity",
-                                                "Type": entity.get('type', ''),
-                                                "Value": entity.get('value', ''),
-                                                "Confidence": f"{entity.get('confidence', 0):.2%}"
-                                            }
-                                            rows.append(entity_row)
+                                            "Value": proc_child.get('value', ''),
+                                            "Raw Value": proc_child.get('raw_value', ''),
+                                            "Confidence": f"{proc_child.get('confidence', 0):.2%}"
+                                        })
+                        
+                        # Generic processing for other sections
+                        else:
+                            for entity in section_data:
+                                # Process entity
+                                proc_entity = checkbox_processor.process_json_field(entity)
+                                rows.append({
+                                    "Page": page_num,
+                                    "Level": "Parent",
+                                    "Type": section_type,
+                                    "Value": proc_entity.get('value', ''),
+                                    "Raw Value": proc_entity.get('raw_value', ''),
+                                    "Confidence": f"{proc_entity.get('confidence', 0):.2%}"
+                                })
+                                
+                                # Process child fields
+                                for child_type, child_entries in entity.get("child_fields", {}).items():
+                                    for child_entry in child_entries:
+                                        proc_child = checkbox_processor.process_json_field(child_entry)
+                                        rows.append({
+                                            "Page": page_num,
+                                            "Level": "Child",
+                                            "Type": child_type,
+                                            "Value": proc_child.get('value', ''),
+                                            "Raw Value": proc_child.get('raw_value', ''),
+                                            "Confidence": f"{proc_child.get('confidence', 0):.2%}"
+                                        })
+                        
+                        # Create DataFrame and write to Excel
+                        if rows:
+                            df_section = pd.DataFrame(rows)
+                            df_section.to_excel(writer, sheet_name=sheet_name, index=False)
                             
-                            if rows:
-                                df = pd.DataFrame(rows)
-                                df.to_excel(writer, sheet_name=sheet_name, index=False)
-                                self._adjust_column_widths(writer, sheet_name, df)
+                            # Format worksheet
+                            worksheet = writer.sheets[sheet_name]
+                            header_format = workbook.add_format({
+                                'bold': True,
+                                'bg_color': '#D3D3D3',
+                                'align': 'center'
+                            })
+                            
+                            # Apply formats
+                            for row_idx, row in enumerate(rows, 1):
+                                if row.get('Level') in ['Section Header', 'Parent', 'Person Header']:
+                                    worksheet.set_row(row_idx, None, header_format)
+                            
+                            self._adjust_column_widths(writer, sheet_name, df_section)
             
             # Upload to GCS
             bucket_name = bucket_name.replace('gs://', '')
@@ -591,6 +691,25 @@ class DocumentAIProcessor:
             if os.path.exists('temp_output.xlsx'):
                 os.remove('temp_output.xlsx')
             raise
+
+    def _format_worksheet(self, worksheet, df, header_format, cell_format):
+        """Apply formatting to worksheet"""
+        # Set column widths
+        for idx, col in enumerate(df.columns):
+            max_length = max(
+                df[col].astype(str).apply(len).max(),
+                len(str(col))
+            ) + 2
+            worksheet.set_column(idx, idx, min(max_length, 50))
+        
+        # Format headers
+        for col_num, value in enumerate(df.columns.values):
+            worksheet.write(0, col_num, value, header_format)
+        
+        # Format cells
+        for row_num in range(len(df)):
+            for col_num in range(len(df.columns)):
+                worksheet.write(row_num + 1, col_num, df.iloc[row_num, col_num], cell_format)
 
     def _process_section_data(self, section_name: str, entities: List[Dict], fields: Union[List[str], Dict]) -> pd.DataFrame:
         """
@@ -779,21 +898,32 @@ class DocumentAIProcessor:
         self, 
         input_file_path: str, 
         processor_id: str,
-        cleanup: bool = True
+        cleanup: bool = True,
+        max_retries: int = 3,
+        retry_delay: int = 5
     ) -> Dict[str, Any]:
         """
-        Process document pages concurrently using ThreadPoolExecutor
+        Process document pages concurrently with enhanced error handling
         
         Args:
             input_file_path (str): Path to the input PDF file
             processor_id (str): Document AI processor ID
             cleanup (bool): Whether to remove temporary page files after processing
+            max_retries (int): Maximum number of retries for failed pages
+            retry_delay (int): Delay between retries in seconds
         
         Returns:
             Dict[str, Any]: Processed document results
         """
         from concurrent.futures import ThreadPoolExecutor, as_completed
         import concurrent.futures
+        import time
+        import logging
+        
+        # Configure logging
+        logging.basicConfig(level=logging.INFO, 
+                            format='%(asctime)s - %(levelname)s - %(message)s')
+        logger = logging.getLogger(__name__)
         
         # Split PDF into individual page files
         page_splitter = DocumentPageSplitter(input_file_path)
@@ -810,6 +940,41 @@ class DocumentAIProcessor:
         total_pages = len(page_files)
         progress_text = st.empty()
         
+        def process_page_with_retry(file_path: str, page_num: int) -> Dict[str, Any]:
+            """
+            Process a single page with retry mechanism
+            
+            Args:
+                file_path (str): Path to the page file
+                page_num (int): Page number
+            
+            Returns:
+                Dict containing processed page data
+            """
+            for attempt in range(max_retries):
+                try:
+                    logger.info(f"Processing page {page_num}, attempt {attempt + 1}")
+                    
+                    # Process the page
+                    processed_page = self.process_page(
+                        processor_id=processor_id, 
+                        file_path=file_path, 
+                        page_number=page_num
+                    )
+                    
+                    return processed_page
+                
+                except Exception as e:
+                    logger.warning(f"Error processing page {page_num}, attempt {attempt + 1}: {str(e)}")
+                    
+                    # If this was the last retry, re-raise the exception
+                    if attempt == max_retries - 1:
+                        logger.error(f"Failed to process page {page_num} after {max_retries} attempts")
+                        raise
+                    
+                    # Wait before retrying
+                    time.sleep(retry_delay)
+        
         try:
             # Determine optimal number of workers
             max_workers = min(10, total_pages)
@@ -819,10 +984,9 @@ class DocumentAIProcessor:
                 # Submit processing tasks for each page
                 future_to_page = {
                     executor.submit(
-                        self.process_page, 
-                        processor_id=processor_id, 
+                        process_page_with_retry, 
                         file_path=page_file, 
-                        page_number=i
+                        page_num=i
                     ): i 
                     for i, page_file in enumerate(page_files, 1)
                 }
@@ -892,19 +1056,21 @@ class DocumentAIProcessor:
                                 
                                 # Add parent entry to appropriate section
                                 page_data["hierarchical_fields"][section].append(parent_entry)
-                        
+                            
                         # Store page in the correct order
                         processed_pages[page_num - 1] = page_data
                     
                     except Exception as e:
-                        st.error(f"Error processing page {page_num}: {str(e)}")
+                        logger.error(f"Error processing page {page_num}: {str(e)}")
                         # Store None for failed pages to maintain order
                         processed_pages[page_num - 1] = None
                 
                 # Filter out failed pages and add to final result
-                full_document_result["pages"] = [
-                    page for page in processed_pages if page is not None
-                ]
+                successful_pages = [page for page in processed_pages if page is not None]
+                full_document_result["pages"] = successful_pages
+                
+                # Log processing summary
+                logger.info(f"Processed {len(successful_pages)} out of {total_pages} pages")
                 
                 # Combine text from all pages
                 full_document_result["text"] = '\n'.join(
@@ -912,11 +1078,13 @@ class DocumentAIProcessor:
                 )
         
         except concurrent.futures.CancelledError:
+            logger.error("Document processing was cancelled")
             st.error("Document processing was cancelled")
             raise
         
         except Exception as e:
-            st.error(f"Error in concurrent document processing: {str(e)}")
+            logger.error(f"Error in concurrent document processing: {str(e)}")
+            st.error(f"Error in document processing: {str(e)}")
             raise
         
         finally:
@@ -930,7 +1098,7 @@ class DocumentAIProcessor:
                     try:
                         os.remove(page_file)
                     except Exception as cleanup_error:
-                        st.warning(f"Could not remove temporary file {page_file}: {cleanup_error}")
+                        logger.warning(f"Could not remove temporary file {page_file}: {cleanup_error}")
         
         return full_document_result
 
@@ -1047,9 +1215,661 @@ class DocumentAIProcessor:
             st.error(f"Error saving JSON to GCS: {str(e)}")
             raise
 
+class CrashReportDataDictionary:
+    """Data dictionary for Texas Peace Officer's Crash Report codes and values"""
+    
+    ROADWAY_SYSTEM = {
+        'IH': 'Interstate',
+        'US': 'US Highway',
+        'SH': 'State Highway',
+        'FM': 'Farm to Market',
+        'RR': 'Ranch Road',
+        'RM': 'Ranch to Market',
+        'BI': 'Business Interstate',
+        'BU': 'Business US',
+        'BS': 'Business State',
+        'BF': 'Business FM',
+        'SL': 'State Loop',
+        'TL': 'Toll Road',
+        'AL': 'Alternate',
+        'SP': 'Spur',
+        'CR': 'County Road',
+        'PR': 'Park Road',
+        'PV': 'Private Road',
+        'RC': 'Recreational Road',
+        'LR': 'Local Road/Street'
+    }
+    
+    ROADWAY_PART = {
+        '1': 'Main/Proper Lane',
+        '2': 'Service/Frontage Road',
+        '3': 'Entrance/On Ramp',
+        '4': 'Exit/Off Ramp',
+        '5': 'Connector/Flyover',
+        '98': 'Other'
+    }
+    
+    DIRECTION = {
+        'N': 'North',
+        'E': 'East',
+        'S': 'South',
+        'W': 'West',
+        'NE': 'Northeast',
+        'SE': 'Southeast',
+        'SW': 'Southwest',
+        'NW': 'Northwest'
+    }
+    
+    STREET_SUFFIX = {
+        'RD': 'Road',
+        'ST': 'Street',
+        'DR': 'Drive',
+        'LOOP': 'Loop',
+        'EXPY': 'Expressway',
+        'CT': 'Court',
+        'CIR': 'Circle',
+        'PL': 'Place',
+        'PARK': 'Park',
+        'CV': 'Cove',
+        'PATH': 'Path',
+        'TRC': 'Trace',
+        'PT': 'Point',
+        'AVE': 'Avenue',
+        'BLVD': 'Boulevard',
+        'PKWY': 'Parkway',
+        'LN': 'Lane',
+        'FWY': 'Freeway',
+        'HWY': 'Highway',
+        'WAY': 'Way',
+        'TRL': 'Trail'
+    }
+    
+    UNIT_DESCRIPTION = {
+        '1': 'Motor Vehicle',
+        '2': 'Train',
+        '3': 'Pedalcyclist',
+        '4': 'Pedestrian',
+        '5': 'Motorized Conveyance',
+        '6': 'Towed/Pushed/Trailer',
+        '7': 'Non-Contact',
+        '98': 'Other'
+    }
+    
+    VEHICLE_COLOR = {
+        'BGE': 'Beige',
+        'BLK': 'Black',
+        'BLU': 'Blue',
+        'BRZ': 'Bronze',
+        'BRO': 'Brown',
+        'CAM': 'Camouflage',
+        'CPR': 'Copper',
+        'GLD': 'Gold',
+        'GRY': 'Gray',
+        'GRN': 'Green',
+        'MAR': 'Maroon',
+        'MUL': 'Multicolored',
+        'ONG': 'Orange',
+        'PNK': 'Pink',
+        'PLE': 'Purple',
+        'RED': 'Red',
+        'SIL': 'Silver',
+        'TAN': 'Tan',
+        'TEA': 'Teal',
+        'TRQ': 'Turquoise',
+        'WHI': 'White',
+        'YEL': 'Yellow',
+        '98': 'Other',
+        '99': 'Unknown'
+    }
+    
+    BODY_STYLE = {
+        'P2': 'Passenger Car, 2-Door',
+        'P4': 'Passenger Car, 4-Door',
+        'PK': 'Pickup',
+        'AM': 'Ambulance',
+        'BU': 'Bus',
+        'SB': 'Yellow School Bus',
+        'FE': 'Farm Equipment',
+        'FT': 'Fire Truck',
+        'MC': 'Motorcycle',
+        'PC': 'Police Car/Truck',
+        'PM': 'Police Motorcycle',
+        'TL': 'Trailer',
+        'TR': 'Truck',
+        'TT': 'Truck Tractor',
+        'VN': 'Van',
+        'EV': 'Neighborhood Vehicle',
+        'SV': 'Sport Utility Vehicle',
+        '98': 'Other',
+        '99': 'Unknown'
+    }
+    
+    AUTONOMOUS_UNIT = {
+        '1': 'Yes',
+        '2': 'No',
+        '99': 'Unknown'
+    }
+    
+    AUTONOMOUS_LEVEL = {
+        '0': 'No Automation',
+        '1': 'Driver Assistance',
+        '2': 'Partial Automation',
+        '3': 'Conditional Automation',
+        '4': 'High Automation',
+        '5': 'Full Automation',
+        '6': 'Automation Level Unknown',
+        '99': 'Unknown'
+    }
+    
+    PERSON_TYPE = {
+        '1': 'Driver',
+        '2': 'Passenger/Occupant',
+        '3': 'Pedalcyclist',
+        '4': 'Pedestrian',
+        '5': 'Driver of Motorcycle Type Vehicle',
+        '6': 'Passenger/Occupant on Motorcycle Type Vehicle',
+        '95': 'Autonomous',
+        '98': 'Other',
+        '99': 'Unknown'
+    }
+    
+    INJURY_SEVERITY = {
+        'A': 'Suspected Serious Injury',
+        'B': 'Suspected Minor Injury',
+        'C': 'Possible Injury',
+        'K': 'Fatal Injury',
+        'N': 'Not Injured',
+        '95': 'Autonomous',
+        '99': 'Unknown'
+    }
+    
+    ETHNICITY = {
+        'W': 'White',
+        'B': 'Black',
+        'H': 'Hispanic',
+        'A': 'Asian',
+        'I': 'American Indian/Alaskan Native',
+        '95': 'Autonomous',
+        '98': 'Other',
+        '99': 'Unknown'
+    }
+    
+    FACTORS_AND_CONDITIONS = {
+        '1': 'Animal on Road - Domestic',
+        '2': 'Animal on Road - Wild',
+        '3': 'Backed without Safety',
+        '4': 'Changed Lane when Unsafe',
+        '14': 'Disabled in Traffic Lane',
+        '15': 'Disregard Stop and Go Signal',
+        '16': 'Disregard Stop Sign or Light',
+        '19': 'Distraction in Vehicle',
+        '20': 'Driver Inattention',
+        '22': 'Failed to Control Speed',
+        '23': 'Failed to Drive in Single Lane',
+        '40': 'Fatigued or Asleep',
+        '41': 'Faulty Evasive Action',
+        '42': 'Fire in Vehicle',
+        '43': 'Fleeing or Evading Police',
+        '44': 'Followed Too Closely',
+        '45': 'Had Been Drinking',
+        '67': 'Intoxicated - Alcohol',
+        '68': 'Intoxicated - Drug',
+        '73': 'Road Rage',
+        '74': 'Cell/Mobile Device Use - Talking',
+        '75': 'Cell/Mobile Device Use - Texting',
+        '76': 'Cell/Mobile Device Use - Other',
+        '77': 'Cell/Mobile Device Use - Unknown'
+    }
+    
+    WEATHER_CONDITION = {
+        '1': 'Clear',
+        '2': 'Cloudy',
+        '3': 'Rain',
+        '4': 'Sleet/Hail',
+        '5': 'Snow',
+        '6': 'Fog',
+        '7': 'Blowing Sand/Snow',
+        '8': 'Severe Crosswinds',
+        '98': 'Other',
+        '99': 'Unknown'
+    }
+    
+    LIGHT_CONDITION = {
+        '1': 'Daylight',
+        '2': 'Dark, Not Lighted',
+        '3': 'Dark, Lighted',
+        '4': 'Dark, Unknown Lighting',
+        '5': 'Dawn',
+        '6': 'Dusk',
+        '98': 'Other',
+        '99': 'Unknown'
+    }
+    
+    ROADWAY_TYPE = {
+        '1': 'Two-Way, Not Divided',
+        '2': 'Two-Way, Divided, Unprotected Median',
+        '3': 'Two-Way, Divided, Protected Median',
+        '4': 'One-Way',
+        '98': 'Other'
+    }
+    
+    SURFACE_CONDITION = {
+        '1': 'Dry',
+        '2': 'Wet',
+        '3': 'Standing Water',
+        '4': 'Snow',
+        '5': 'Slush',
+        '6': 'Ice',
+        '7': 'Sand, Mud, Dirt',
+        '98': 'Other',
+        '99': 'Unknown'
+    }
+    
+    TRAFFIC_CONTROL = {
+        '2': 'Inoperative',
+        '3': 'Officer',
+        '4': 'Flagman',
+        '5': 'Signal Light',
+        '6': 'Flashing Red Light',
+        '7': 'Flashing Yellow Light',
+        '8': 'Stop Sign',
+        '9': 'Yield Sign',
+        '10': 'Warning Sign',
+        '11': 'Center Stripe/Divider',
+        '12': 'No Passing Zone',
+        '13': 'RR Gate/Signal',
+        '15': 'Crosswalk',
+        '16': 'Bike Lane',
+        '17': 'Marked Lanes',
+        '18': 'Signal Light With Red Light Running Camera',
+        '96': 'None',
+        '98': 'Other'
+    }
+
+    # New code mappings for more detailed person description processing
+    SEX_CODES = {
+        '1': 'Male',
+        '2': 'Female',
+        '99': 'Unknown'
+    }
+    
+    EJECT_CODES = {
+        '1': 'Not Ejected',
+        '2': 'Partially Ejected',
+        '3': 'Totally Ejected',
+        '97': 'Not Applicable',
+        '99': 'Unknown'
+    }
+    
+    RESTRAINT_CODES = {
+        '1': 'Lap and Shoulder Belt',
+        '2': 'Lap Belt Only',
+        '3': 'Shoulder Belt Only',
+        '4': 'Child Restraint - Forward Facing',
+        '5': 'Child Restraint - Rear Facing',
+        '6': 'Booster Seat',
+        '7': 'None Used',
+        '97': 'Not Applicable',
+        '99': 'Unknown'
+    }
+    
+    AIRBAG_CODES = {
+        '1': 'Deployed',
+        '2': 'Not Deployed',
+        '3': 'Deployed, Unknown Effectiveness',
+        '4': 'Not Equipped',
+        '97': 'Not Applicable',
+        '99': 'Unknown'
+    }
+    
+    HELMET_CODES = {
+        '1': 'Helmet Used',
+        '2': 'No Helmet',
+        '97': 'Not Applicable',
+        '99': 'Unknown'
+    }
+    
+    SOBRIETY_CODES = {
+        'Y': 'Yes',
+        'N': 'No',
+        '99': 'Unknown'
+    }
+    
+    SUBSTANCE_SPEC_CODES = {
+        '96': 'No Test Performed',
+        '97': 'Not Applicable',
+        '99': 'Unknown'
+    }
+    
+    SUBSTANCE_RESULT_CODES = {
+        '1': 'Positive',
+        '2': 'Negative',
+        '96': 'No Test Performed',
+        '97': 'Not Applicable',
+        '99': 'Unknown'
+    }
+
+    @classmethod
+    def get_description(cls, category: str, code: str) -> str:
+        """
+        Get the description for a code in a specific category
+        
+        Args:
+            category: The category to look up (e.g., 'ROADWAY_SYSTEM')
+            code: The code to look up
+            
+        Returns:
+            The description for the code, or the original code if not found
+        """
+        try:
+            category_dict = getattr(cls, category.upper())
+            return category_dict.get(str(code), code)
+        except AttributeError:
+            return code
+
+    @classmethod
+    def decode_multiple(cls, category: str, codes: str) -> List[str]:
+        """
+        Decode multiple codes from a string
+        
+        Args:
+            category: The category to look up
+            codes: String of codes separated by spaces or commas
+            
+        Returns:
+            List of descriptions for the codes
+        """
+        if not codes:
+            return []
+            
+        # Split codes by space or comma
+        code_list = [c.strip() for c in str(codes).replace(',', ' ').split()]
+        return [cls.get_description(category, code) for code in code_list]
+
+    @classmethod
+    def is_valid_code(cls, category: str, code: str) -> bool:
+        """
+        Check if a code is valid for a category
+        
+        Args:
+            category: The category to check
+            code: The code to validate
+            
+        Returns:
+            True if the code is valid, False otherwise
+        """
+        try:
+            category_dict = getattr(cls, category.upper())
+            return str(code) in category_dict
+        except AttributeError:
+            return False
+
 class CrashReportDataProcessor:
     """Utility class for processing and transforming crash report data"""
     
+    def __init__(self):
+        self.processed_location = False
+        self.data_dict = CrashReportDataDictionary()
+
+    def process_location_data(self, location_data: Dict) -> Dict:
+        """
+        Process location data with decoded values to support Google Maps lookup
+        
+        Args:
+            location_data: Raw location data dictionary
+            
+        Returns:
+            Processed location data with structured address and decoded values
+        """
+        if self.processed_location:
+            return {}
+            
+        address_components = {}
+        decoded_components = {}
+        
+        for field_type, entries in location_data.get("child_fields", {}).items():
+            if not entries:
+                continue
+                
+            value = entries[0].get('value', '').strip()
+            
+            # Decode values based on field type
+            if field_type == 'rdwy_sys':
+                decoded_value = self.data_dict.get_description('ROADWAY_SYSTEM', value)
+                decoded_components['roadway_system'] = decoded_value
+            elif field_type == 'rdwy_part':
+                decoded_value = self.data_dict.get_description('ROADWAY_PART', value)
+                decoded_components['roadway_part'] = decoded_value
+            elif field_type == 'dir_of_traffic':
+                decoded_value = self.data_dict.get_description('DIRECTION', value)
+                decoded_components['direction'] = decoded_value
+            elif field_type == 'street_suffix':
+                decoded_value = self.data_dict.get_description('STREET_SUFFIX', value)
+                decoded_components['street_suffix'] = decoded_value
+                
+            # Store original values for address building
+            if field_type in ['block_num', 'street_prefix', 'street_name', 'street_suffix']:
+                address_components[field_type] = value
+        
+        # Build structured address
+        address = " ".join(filter(None, [
+            address_components.get('block_num', ''),
+            address_components.get('street_prefix', ''),
+            address_components.get('street_name', ''),
+            address_components.get('street_suffix', '')
+        ]))
+        
+        result = {
+            'structured_address': address,
+            'components': address_components,
+            'decoded_values': decoded_components
+        }
+        
+        self.processed_location = True
+        return result
+
+    def extract_person_description(self, description: str) -> Dict[str, str]:
+        """
+        Extract and decode detailed person description
+        
+        Args:
+            description: Raw person description string
+            
+        Returns:
+            Dictionary of decoded person information with structured details
+        """
+        # Initialize structured fields
+        fields = {
+            'injury_severity': '',
+            'age': '',
+            'ethnicity': '',
+            'sex': '',
+            'eject': '',
+            'restr': '',
+            'airbag': '',
+            'helmet': '',
+            'sol': '',
+            'alc_spec': '',
+            'alc_result': '',
+            'drug_spec': '',
+            'drug_result': '',
+            'drug_category': ''
+        }
+        
+        if not description:
+            return fields
+        
+        # Clean and split description by lines
+        parts = [p.strip() for p in description.split('\n') if p.strip()]
+        
+        try:
+            # Ensure we have enough parts
+            if len(parts) < 8:
+                return fields
+            
+            # Parse fields in order
+            fields['injury_severity'] = self.data_dict.get_description('INJURY_SEVERITY', parts[0])
+            
+            # Age (find first numeric value)
+            age_parts = [p for p in parts if p.isdigit()]
+            if age_parts:
+                fields['age'] = age_parts[0]
+            
+            # Ethnicity 
+            ethnicity_parts = [p for p in parts if p in self.data_dict.ETHNICITY]
+            if ethnicity_parts:
+                fields['ethnicity'] = self.data_dict.get_description('ETHNICITY', ethnicity_parts[0])
+            
+            # Sex
+            sex_parts = [p for p in parts if p in self.data_dict.SEX_CODES]
+            if sex_parts:
+                fields['sex'] = self.data_dict.SEX_CODES.get(sex_parts[0], sex_parts[0])
+            
+            # Find parts for other fields
+            remaining_parts = [p for p in parts if p not in [
+                fields['injury_severity'], 
+                fields.get('age', ''), 
+                fields.get('ethnicity', ''), 
+                fields.get('sex', '')
+            ]]
+            
+            # Ensure at least 5 more parts are available
+            if len(remaining_parts) >= 5:
+                # Eject
+                fields['eject'] = self.data_dict.EJECT_CODES.get(remaining_parts[0], remaining_parts[0])
+                
+                # Restraint
+                fields['restr'] = self.data_dict.RESTRAINT_CODES.get(remaining_parts[1], remaining_parts[1])
+                
+                # Airbag
+                fields['airbag'] = self.data_dict.AIRBAG_CODES.get(remaining_parts[2], remaining_parts[2])
+                
+                # Helmet
+                fields['helmet'] = self.data_dict.HELMET_CODES.get(remaining_parts[3], remaining_parts[3])
+            
+            # Optional subsequent fields
+            if len(remaining_parts) >= 6:
+                # Sobriety of Last Drink
+                fields['sol'] = self.data_dict.SOBRIETY_CODES.get(remaining_parts[4], remaining_parts[4])
+            
+            # Substance-related fields
+            if len(remaining_parts) >= 8:
+                # Alcohol specification and result
+                fields['alc_spec'] = self.data_dict.SUBSTANCE_SPEC_CODES.get(remaining_parts[5], remaining_parts[5])
+                fields['alc_result'] = self.data_dict.SUBSTANCE_RESULT_CODES.get(remaining_parts[6], remaining_parts[6])
+                
+                # Drug-related fields
+                fields['drug_spec'] = self.data_dict.SUBSTANCE_SPEC_CODES.get(remaining_parts[7], remaining_parts[7])
+                
+                # Additional drug-related fields if available
+                if len(remaining_parts) >= 10:
+                    fields['drug_result'] = self.data_dict.SUBSTANCE_RESULT_CODES.get(remaining_parts[8], remaining_parts[8])
+                    fields['drug_category'] = self.data_dict.SUBSTANCE_SPEC_CODES.get(remaining_parts[9], remaining_parts[9])
+            
+        except Exception as e:
+            print(f"Error processing person description: {e}")
+        
+        return fields
+
+    def process_vehicle_unit(self, vehicle_data: Dict) -> Dict:
+        """
+        Process vehicle unit data with decoded values
+        
+        Args:
+            vehicle_data: Raw vehicle data dictionary
+            
+        Returns:
+            Processed vehicle data with decoded values
+        """
+        processed_data = {
+            'unit_info': {},
+            'vehicle_info': {},
+            'driver_info': None,
+            'passengers': []
+        }
+        
+        try:
+            # Process unit description
+            if 'unit_desc' in vehicle_data.get('child_fields', {}):
+                value = vehicle_data['child_fields']['unit_desc'][0].get('value', '')
+                processed_data['unit_info']['type'] = self.data_dict.get_description('UNIT_DESCRIPTION', value)
+            
+            # Process vehicle information
+            for field in ['body_style', 'veh_color', 'veh_year', 'veh_make', 'veh_model']:
+                if field in vehicle_data.get('child_fields', {}):
+                    value = vehicle_data['child_fields'][field][0].get('value', '')
+                    if field == 'body_style':
+                        processed_data['vehicle_info'][field] = self.data_dict.get_description('BODY_STYLE', value)
+                    elif field == 'veh_color':
+                        processed_data['vehicle_info'][field] = self.data_dict.get_description('VEHICLE_COLOR', value)
+                    else:
+                        processed_data['vehicle_info'][field] = value
+            
+            # Process autonomous information
+            if 'autonomous_unit' in vehicle_data.get('child_fields', {}):
+                value = vehicle_data['child_fields']['autonomous_unit'][0].get('value', '')
+                processed_data['vehicle_info']['autonomous'] = self.data_dict.get_description('AUTONOMOUS_UNIT', value)
+            
+            if 'autonomous_level_engaged' in vehicle_data.get('child_fields', {}):
+                value = vehicle_data['child_fields']['autonomous_level_engaged'][0].get('value', '')
+                processed_data['vehicle_info']['autonomous_level'] = self.data_dict.get_description('AUTONOMOUS_LEVEL', value)
+            
+            # Process person information
+            person_data = self.process_person_data(vehicle_data)
+            processed_data.update(person_data)
+            
+        except Exception as e:
+            print(f"Error processing vehicle unit: {e}")
+            
+        return processed_data
+
+    def process_person_data(self, vehicle_data: Dict) -> Dict:
+        """
+        Process person data with proper organization and decoded values
+        
+        Args:
+            vehicle_data: Vehicle data dictionary containing person information
+            
+        Returns:
+            Dictionary with processed driver and passenger information
+        """
+        processed_data = {'driver': None, 'passengers': []}
+        passenger_count = 0
+        
+        try:
+            for person in vehicle_data.get('child_fields', {}).get('person_num', []):
+                person_info = {'details': {}}
+                
+                # Process basic information
+                for entity in person.get('entities', []):
+                    if entity['type'] == 'person_name':
+                        person_info['name'] = entity['value']
+                    elif entity['type'] == 'person_type':
+                        person_info['type'] = self.data_dict.get_description('PERSON_TYPE', entity['value'])
+                        # Store original code for sorting
+                        person_info['type_code'] = entity['value']
+                    elif entity['type'] == 'person_description':
+                        person_info['details'] = self.extract_person_description(entity['value'])
+                
+                # Organize by driver/passenger
+                if person_info.get('type_code') == '1':  # Driver
+                    processed_data['driver'] = person_info
+                else:
+                    passenger_count += 1
+                    person_info['passenger_num'] = passenger_count
+                    processed_data['passengers'].append(person_info)
+            
+            # Sort passengers by seat position if available
+            processed_data['passengers'].sort(key=lambda x: (
+                x.get('details', {}).get('seat_position', ''),
+                x.get('passenger_num', 0)
+            ))
+            
+        except Exception as e:
+            print(f"Error processing person data: {e}")
+            
+        return processed_data
+
     def convert_checkbox_value(self, value: str) -> Union[bool, str]:
         """
         Convert checkbox text to boolean or appropriate string value
@@ -1077,6 +1897,91 @@ class CrashReportDataProcessor:
             
         # Return original value if not a checkbox
         return value.strip()
+
+    def clean_narrative(self, narrative: str) -> str:
+        """
+        Clean narrative text by removing tags and normalizing whitespace
+        
+        Args:
+            narrative: Raw narrative text
+            
+        Returns:
+            Cleaned narrative text
+        """
+        if not narrative:
+            return ""
+            
+        # Remove <cr> tags
+        cleaned = narrative.replace('<cr>', ' ')
+        
+        # Remove any other HTML-like tags
+        cleaned = re.sub(r'<[^>]+>', ' ', cleaned)
+        
+        # Normalize whitespace
+        cleaned = ' '.join(cleaned.split())
+        
+        return cleaned
+
+    def process_factors_and_conditions(self, factors_data: Dict) -> Dict:
+        """
+        Process factors and conditions with decoded values
+        
+        Args:
+            factors_data: Raw factors and conditions data
+            
+        Returns:
+            Processed factors data with decoded values
+        """
+        processed_data = {
+            'contributing_factors': [],
+            'vehicle_defects': [],
+            'environmental_conditions': {}
+        }
+        
+        try:
+            # Process contributing factors
+            if 'contributing_factors' in factors_data.get('child_fields', {}):
+                for factor in factors_data['child_fields']['contributing_factors']:
+                    value = factor.get('value', '')
+                    decoded = self.data_dict.get_description('FACTORS_AND_CONDITIONS', value)
+                    processed_data['contributing_factors'].append(decoded)
+            
+            # Process environmental conditions
+            condition_mappings = {
+                'weather_cond': 'WEATHER_CONDITION',
+                'light_cond': 'LIGHT_CONDITION',
+                'road_type': 'ROADWAY_TYPE',
+                'surface_cond': 'SURFACE_CONDITION',
+                'traffic_control': 'TRAFFIC_CONTROL'
+            }
+            
+            for field, category in condition_mappings.items():
+                if field in factors_data.get('child_fields', {}):
+                    value = factors_data['child_fields'][field][0].get('value', '')
+                    processed_data['environmental_conditions'][field] = self.data_dict.get_description(category, value)
+            
+        except Exception as e:
+            print(f"Error processing factors and conditions: {e}")
+            
+        return processed_data
+
+    def sort_vehicles_by_unit(self, data: List[Dict]) -> List[Dict]:
+        """
+        Sort vehicle data by unit number
+        
+        Args:
+            data: List of vehicle data dictionaries
+            
+        Returns:
+            Sorted list of vehicle data
+        """
+        def get_unit_num(vehicle):
+            try:
+                return int(vehicle.get('child_fields', {}).get('unit_num', [{}])[0].get('value', '0'))
+            except (ValueError, IndexError):
+                return 0
+                
+        return sorted(data, key=get_unit_num)
 
 class CheckboxProcessor:
     """Process checkbox values from JSON extraction"""
