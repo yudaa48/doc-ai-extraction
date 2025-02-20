@@ -17,8 +17,8 @@ PROJECT_CONFIG = {
     "project_id": "neon-camp-449123-j1",
     "location": "us",
     "processor_id": "65b51dc1bf01ad16",
-    "input_bucket": "doc-ai-extraction",
-    "output_bucket": "doc-ai-extraction"
+    "input_bucket": "doc-ai-extraction-dev",
+    "output_bucket": "doc-ai-extraction-dev"
 }
 
 class DocumentPageSplitter:
@@ -318,6 +318,13 @@ class DocumentAIProcessor:
         
         return None
 
+    def match_string_for_boolean(self, types: str, string: str) -> str:
+        elgible_type = ["outside_city_limit", "crash_damage_1000", 
+                        'owner_lesse_tick_box','proof_of_fin_resp','investigation_complete']
+        if types.lower() in elgible_type:
+            return "true" if "☑" in string.lower() else "false"
+        return string
+
     def save_json_to_gcs(self, bucket_name: str, data: Dict[str, Any], filename: str, prefix: str = '') -> str:
         """Save JSON data to Google Cloud Storage with section-based organization"""
         try:
@@ -387,7 +394,7 @@ class DocumentAIProcessor:
                                         "Page": page_num,
                                         "Level": "Field",
                                         "Type": field_type,
-                                        "Value": entry.get('value', ''),
+                                        "Value": self.match_string_for_boolean(field_type, entry.get('value', '')),
                                         "Confidence": f"{entry.get('confidence', 0):.2%}"
                                     }
                                     rows.append(field_row)
@@ -475,7 +482,7 @@ class DocumentAIProcessor:
                                                 entity_row = {
                                                     "Page": page_num,
                                                     "Level": "Entity",
-                                                    "Type": entity.get('type', ''),
+                                                    "Type": str(entity.get('type', '')).replace('_', f'{parent_idx}_'),
                                                     "Value": entity.get('value', ''),
                                                     "Confidence": f"{entity.get('confidence', 0):.2%}"
                                                 }
@@ -496,7 +503,7 @@ class DocumentAIProcessor:
                                                 "Page": page_num,
                                                 "Level": "Child",
                                                 "Type": child_type,
-                                                "Value": child_entry.get('value', ''),
+                                                "Value": self.match_string_for_boolean(child_type, child_entry.get('value', '')),
                                                 "Confidence": f"{child_entry.get('confidence', 0):.2%}"
                                             }
                                             rows.append(child_row)
@@ -550,7 +557,7 @@ class DocumentAIProcessor:
                                             "Page": page_num,
                                             "Level": "Child",
                                             "Type": child_type,
-                                            "Value": child_entry.get('value', ''),
+                                            "Value": self.match_string_for_boolean(child_type, child_entry.get('value', '')),
                                             "Confidence": f"{child_entry.get('confidence', 0):.2%}"
                                         }
                                         rows.append(child_row)
