@@ -482,7 +482,7 @@ class DocumentAIProcessor:
                                                 entity_row = {
                                                     "Page": page_num,
                                                     "Level": "Entity",
-                                                    "Type": str(entity.get('type', '')).replace('_', f'{parent_idx}_'),
+                                                    "Type": str(entity.get('type', '')).replace('_', f'{person_idx}_'),
                                                     "Value": entity.get('value', ''),
                                                     "Confidence": f"{entity.get('confidence', 0):.2%}"
                                                 }
@@ -566,7 +566,7 @@ class DocumentAIProcessor:
                                             entity_row = {
                                                 "Page": page_num,
                                                 "Level": "Entity",
-                                                "Type": entity.get('type', ''),
+                                                "Type": str(entity.get('type', '')).replace('_', f'{person_idx}_'),
                                                 "Value": entity.get('value', ''),
                                                 "Confidence": f"{entity.get('confidence', 0):.2%}"
                                             }
