@@ -388,16 +388,53 @@ class DocumentAIProcessor:
                                 rows.append(section_header)
                             
                             # Process fields within each section
+                            # Initialize an empty dictionary to store street address components
+                            street_address = {}
+
+                            # Define eligible field types for street address components
+                            eligible_types = ["block_num", "street_name", "street_prefix", "street_suffix"]
+
+                            # Loop through child fields in the location dictionary
                             for field_type, field_entries in location.get("child_fields", {}).items():
+                                # Convert field_type to lowercase for case-insensitive comparison
+                                field_type_lower = field_type.lower()
+
+                                # Loop through each entry in the field_entries list
                                 for entry in field_entries:
-                                    field_row = {
-                                        "Page": page_num,
-                                        "Level": "Field",
-                                        "Type": field_type,
-                                        "Value": self.match_string_for_boolean(field_type, entry.get('value', '')),
-                                        "Confidence": f"{entry.get('confidence', 0):.2%}"
-                                    }
-                                    rows.append(field_row)
+                                    # If the field type is not eligible, add it to the rows list
+                                    if field_type_lower not in eligible_types:
+                                        field_row = {
+                                            "Page": page_num,
+                                            "Level": "Field",
+                                            "Type": field_type,
+                                            "Value": self.match_string_for_boolean(field_type, entry.get("value", "")),
+                                            "Confidence": f"{entry.get('confidence', 0):.2%}"
+                                        }
+                                        rows.append(field_row)
+                                    else:
+                                        # If the field type is 'street_suffix', construct the full street address
+                                        if field_type_lower == "street_suffix":
+                                            # Construct the full street address using components from street_address
+                                            full_address = (
+                                                f'{street_address.get("block_num", "")} '
+                                                f'{street_address.get("street_prefix", "")} '
+                                                f'{street_address.get("street_name", "")} '
+                                                f'{entry.get("value", "")}'
+                                            ).strip()  # Remove any extra spaces
+
+                                            # Add the full street address to the rows list
+                                            field_row = {
+                                                "Page": page_num,
+                                                "Level": "Field",
+                                                "Type": "street_address",
+                                                "Value": full_address,
+                                                "Confidence": f"{entry.get('confidence', 0):.2%}"
+                                            }
+                                            rows.append(field_row)
+                                        else:
+                                            # Store the value in the street_address dictionary for later use
+                                            street_address[field_type_lower] = entry.get("value", "")
+                                    
                             
                             # Add separator after each section
                             separator_row = {
