@@ -1,5 +1,5 @@
 # Use an official Python runtime as a parent image
-FROM python:3.9-slim
+FROM --platform=linux/amd64 python:3.9-slim
 
 # Set the working directory in the container
 WORKDIR /app
@@ -16,19 +16,22 @@ RUN apt-get update && apt-get install -y \
 # Upgrade pip
 RUN pip install --no-cache-dir --upgrade pip
 
-# Copy the current directory contents into the container at /app
-COPY . /app
+# Copy requirements first to leverage Docker cache
+COPY requirements.txt /app/
 
-# Install Python dependencies with verbose output and continue on errors
-RUN pip install --no-cache-dir \
-    --verbose \
-    --upgrade \
-    --ignore-installed \
-    -r requirements.txt || (cat /root/.pip/pip.log && exit 1)
+# Install Python dependencies
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy the rest of the application
+COPY . /app
 
 # Set environment variables
 ENV PYTHONUNBUFFERED=1
 ENV STREAMLIT_SERVER_PORT=8080
+
+# Create a non-root user and switch to it
+RUN useradd -m -u 1000 appuser
+USER appuser
 
 # Expose the port the app runs on
 EXPOSE 8080
