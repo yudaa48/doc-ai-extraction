@@ -17,8 +17,8 @@ PROJECT_CONFIG = {
     "project_id": "neon-camp-449123-j1",
     "location": "us",
     "processor_id": "65b51dc1bf01ad16",
-    "input_bucket": "doc-ai-extraction-dev",
-    "output_bucket": "doc-ai-extraction-dev"
+    "input_bucket": "doc-ai-extraction",
+    "output_bucket": "doc-ai-extraction"
 }
 
 class DocumentPageSplitter:
@@ -1150,9 +1150,17 @@ def main():
                 input_filename = f"{base_name}_{timestamp}{ext}"
                 output_filename = f"{base_name}_{timestamp}"
                 
-                # Save uploaded file
+                # Save uploaded file temporarily
                 with open(input_filename, "wb") as f:
                     f.write(uploaded_file.getvalue())
+
+                # Upload file to GCS first
+                input_gcs_uri = processor.upload_to_gcs(
+                    bucket_name=PROJECT_CONFIG['input_bucket'],
+                    source_file_path=input_filename,  # Changed from source_file to source_file_path
+                    destination_blob_name=input_filename,
+                    prefix="prod-input"
+                )
                 
                 # Process document
                 st.session_state.document_result = processor.process_document_page_by_page(
@@ -1165,7 +1173,7 @@ def main():
                     bucket_name=PROJECT_CONFIG['output_bucket'],
                     data=st.session_state.document_result,
                     filename=output_filename,
-                    prefix="output"
+                    prefix="prod-output"
                 )
                 
                 # Then save Excel
@@ -1173,10 +1181,10 @@ def main():
                     bucket_name=PROJECT_CONFIG['output_bucket'],
                     data=st.session_state.document_result,
                     filename=f"{output_filename}.xlsx",
-                    prefix="output"
+                    prefix="prod-output"
                 )
                 
-                st.session_state.excel_output_filename = f"output/{output_filename}.xlsx"
+                st.session_state.excel_output_filename = f"prod-output/{output_filename}.xlsx"  # Updated path
                 st.session_state.excel_gcs_uri = excel_gcs_uri
                 st.session_state.processing_complete = True
                 
