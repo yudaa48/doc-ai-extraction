@@ -6,6 +6,7 @@ WORKDIR /app
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y \
+    tempfile \
     poppler-utils \
     build-essential \
     libpoppler-cpp-dev \
