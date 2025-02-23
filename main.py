@@ -1,3 +1,4 @@
+import tempfile
 import streamlit as st
 import pandas as pd
 import json
@@ -17,8 +18,8 @@ PROJECT_CONFIG = {
     "project_id": "neon-camp-449123-j1",
     "location": "us",
     "processor_id": "65b51dc1bf01ad16",
-    "input_bucket": "doc-ai-extraction-dev",
-    "output_bucket": "doc-ai-extraction-dev"
+    "input_bucket": "doc-ai-extraction",
+    "output_bucket": "doc-ai-extraction"
 }
 
 class DocumentPageSplitter:
@@ -324,7 +325,110 @@ class DocumentAIProcessor:
         if types.lower() in elgible_type:
             return "true" if "☑" in string.lower() else "false"
         return string
-
+    
+    def extract_person_description(self, description: str) -> Dict[str, str]:
+        """
+        Extract and decode detailed person description
+        
+        Args:
+            description: Raw person description string
+            
+        Returns:
+            Dictionary of decoded person information with structured details
+        """
+        # Initialize structured fields
+        fields = {
+            'injury_severity': '',
+            'age': '',
+            'ethnicity': '',
+            'sex': '',
+            'eject': '',
+            'restr': '',
+            'airbag': '',
+            'helmet': '',
+            'sol': '',
+            'alc_spec': '',
+            'alc_result': '',
+            'drug_spec': '',
+            'drug_result': '',
+            'drug_category': ''
+        }
+        
+        if not description:
+            return fields
+        
+        # Clean and split description by lines
+        parts = [p.strip() for p in description.split('\n') if p.strip()]
+        
+        try:
+            # Ensure we have enough parts
+            if len(parts) < 8:
+                return fields
+            
+            # Parse fields in order
+            fields['injury_severity'] = self.data_dict.get_description('INJURY_SEVERITY', parts[0])
+            
+            # Age (find first numeric value)
+            age_parts = [p for p in parts if p.isdigit()]
+            if age_parts:
+                fields['age'] = age_parts[0]
+            
+            # Ethnicity 
+            ethnicity_parts = [p for p in parts if p in self.data_dict.ETHNICITY]
+            if ethnicity_parts:
+                fields['ethnicity'] = self.data_dict.get_description('ETHNICITY', ethnicity_parts[0])
+            
+            # Sex
+            sex_parts = [p for p in parts if p in self.data_dict.SEX_CODES]
+            if sex_parts:
+                fields['sex'] = self.data_dict.SEX_CODES.get(sex_parts[0], sex_parts[0])
+            
+            # Find parts for other fields
+            remaining_parts = [p for p in parts if p not in [
+                fields['injury_severity'], 
+                fields.get('age', ''), 
+                fields.get('ethnicity', ''), 
+                fields.get('sex', '')
+            ]]
+            
+            # Ensure at least 5 more parts are available
+            if len(remaining_parts) >= 5:
+                # Eject
+                fields['eject'] = self.data_dict.EJECT_CODES.get(remaining_parts[0], remaining_parts[0])
+                
+                # Restraint
+                fields['restr'] = self.data_dict.RESTRAINT_CODES.get(remaining_parts[1], remaining_parts[1])
+                
+                # Airbag
+                fields['airbag'] = self.data_dict.AIRBAG_CODES.get(remaining_parts[2], remaining_parts[2])
+                
+                # Helmet
+                fields['helmet'] = self.data_dict.HELMET_CODES.get(remaining_parts[3], remaining_parts[3])
+            
+            # Optional subsequent fields
+            if len(remaining_parts) >= 6:
+                # Sobriety of Last Drink
+                fields['sol'] = self.data_dict.SOBRIETY_CODES.get(remaining_parts[4], remaining_parts[4])
+            
+            # Substance-related fields
+            if len(remaining_parts) >= 8:
+                # Alcohol specification and result
+                fields['alc_spec'] = self.data_dict.SUBSTANCE_SPEC_CODES.get(remaining_parts[5], remaining_parts[5])
+                fields['alc_result'] = self.data_dict.SUBSTANCE_RESULT_CODES.get(remaining_parts[6], remaining_parts[6])
+                
+                # Drug-related fields
+                fields['drug_spec'] = self.data_dict.SUBSTANCE_SPEC_CODES.get(remaining_parts[7], remaining_parts[7])
+                
+                # Additional drug-related fields if available
+                if len(remaining_parts) >= 10:
+                    fields['drug_result'] = self.data_dict.SUBSTANCE_RESULT_CODES.get(remaining_parts[8], remaining_parts[8])
+                    fields['drug_category'] = self.data_dict.SUBSTANCE_SPEC_CODES.get(remaining_parts[9], remaining_parts[9])
+            
+        except Exception as e:
+            print(f"Error processing person description: {e}")
+        
+        return fields
+    
     def save_json_to_gcs(self, bucket_name: str, data: Dict[str, Any], filename: str, prefix: str = '') -> str:
         """Save JSON data to Google Cloud Storage with section-based organization"""
         try:
@@ -1147,14 +1251,17 @@ def main():
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                 original_filename = uploaded_file.name
                 base_name, ext = os.path.splitext(original_filename)
-                input_filename = f"{base_name}_{timestamp}{ext}"
                 output_filename = f"{base_name}_{timestamp}"
                 
-                # Save uploaded file
-                with open(input_filename, "wb") as f:
-                    f.write(uploaded_file.getvalue())
+                # Save uploaded file to a temporary directory
+                input_filename = ''
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf", dir=".") as temp_file:
+                    temp_file.write(uploaded_file.getvalue())
+                    input_filename = temp_file.name
+                os.remove(temp_file)
                 
                 # Process document
+                print(f'path : {input_filename}')
                 st.session_state.document_result = processor.process_document_page_by_page(
                     input_file_path=input_filename,
                     processor_id=PROJECT_CONFIG['processor_id']
