@@ -6,12 +6,24 @@ import os
 import shutil
 import PyPDF2
 import io
+import requests
+import google.auth.transport.requests
+import urllib.parse
+import datetime
+import pytz
+import google_auth_oauthlib.flow
+import webbrowser
 from google.cloud import storage, documentai
 from google.api_core.client_options import ClientOptions
 from typing import Dict, Any, Optional, List, Union, Union
-from datetime import datetime
 from PIL import Image
 from pdf2image import convert_from_path
+from google.oauth2 import id_token
+from dotenv import load_dotenv
+
+
+load_dotenv()
+
 
 # Predefined Configuration
 PROJECT_CONFIG = {
@@ -1220,6 +1232,16 @@ def download_file_from_gcs(bucket_name: str, source_blob_name: str) -> bytes:
     return blob.download_as_bytes()
 
 def main():
+    st.write(f"Welcome, {st.session_state['user']['name']}!")
+
+    if st.button("Logout"):
+        st.session_state.clear()  
+        st.session_state["page"] = "login"  
+        st.query_params.clear() 
+        st.rerun()
+
+
+
     st.title("Document AI PDF Extraction")
     
     # Initialize session state variables
@@ -1324,5 +1346,250 @@ def main():
         except Exception as e:
             st.error(f"Error preparing download: {str(e)}")
 
+
+CLIENT_SECRETS_FILE = "client_secret_doc_ai_extraction.json"
+SCOPES = ["https://www.googleapis.com/auth/userinfo.profile", "https://www.googleapis.com/auth/userinfo.email", "openid"]
+BACKEND_URL = os.getenv("BACKEND_URL") 
+REDIRECT_URI = os.getenv("REDIRECT_URI")
+
+
+def login_with_google():
+    flow = google_auth_oauthlib.flow.Flow.from_client_secrets_file(
+        CLIENT_SECRETS_FILE, scopes=SCOPES
+    )
+    flow.redirect_uri = REDIRECT_URI
+    
+    authorization_url, state = flow.authorization_url(prompt="consent")
+    
+    # Simpan state di session
+    st.session_state["oauth_state"] = state
+    st.session_state["oauth_flow"] = flow
+    
+    # Redirect ke Google
+    st.markdown(f'<meta http-equiv="refresh" content="0;url={authorization_url}">', unsafe_allow_html=True)
+
+
+def handle_google_callback():
+    query_params = st.query_params
+    if "code" not in query_params:
+        st.error("Authorization code not found.")
+        return
+
+    if "token" in st.session_state:
+        return
+
+    code = query_params["code"]
+    # st.write(f"Authorization Code: {code}")  # Debugging
+
+    if "oauth_flow" not in st.session_state:
+        flow = google_auth_oauthlib.flow.Flow.from_client_secrets_file(
+            CLIENT_SECRETS_FILE, scopes=SCOPES
+        )
+        flow.redirect_uri = REDIRECT_URI
+        st.session_state["oauth_flow"] = flow
+
+    flow = st.session_state["oauth_flow"]
+
+    try:
+        flow.fetch_token(
+            code=code,
+            include_client_id=True  # 
+        )
+        
+        credentials = flow.credentials
+        access_token = credentials.token
+
+        # Kirim token ke backend
+        response = requests.post(f"{BACKEND_URL}/auth/signin-google", json={"accessToken": access_token})
+        
+        if response.status_code == 200:
+            data = response.json()
+            st.session_state["user"] = data["user"]
+            st.session_state["token"] = data["token"]
+            st.session_state["page"] = "main"
+            st.success("Login successful! Redirecting...")
+            st.rerun()
+        else:
+            st.error(f"Google login failed: {response.json().get('error', 'Unknown error')}")
+    except Exception as e:
+        st.error(f"Error during token exchange: {e}")
+
+
+# Halaman login manual (email & password)
+def login_page():
+    st.title("Login Page")
+    if "user" in st.session_state and st.session_state.get("user"):
+        st.session_state["page"] = "main"
+        st.rerun()
+    
+    if "code" in st.query_params:
+        handle_google_callback()
+        
+    st.text("Don't have an account?")
+    if st.button("Register"):
+        st.session_state["page"] = "register"
+        st.rerun()
+
+    if "user" not in st.session_state:
+        st.session_state["user"] = {}
+    if "page" not in st.session_state:
+        st.session_state["page"] = "login"
+
+    email = st.text_input("Email")
+    password = st.text_input("Password", type="password")
+
+    if st.button("Login", type="primary", use_container_width=True):
+        if email and password:
+            response = requests.post(f"{BACKEND_URL}/auth/login", json={"email": email, "password": password})
+            if response.status_code == 200:
+                data = response.json()
+                
+                if data["user"]["status"] == "Active":
+                    st.session_state["user"] = data["user"]  # Simpan user info
+                    st.session_state["token"] = data["token"]  # Simpan token
+                    st.session_state["page"] = "main"
+                    st.rerun()
+                else:
+                    st.error("Your account is not active. Please contact support.")
+            else:
+                st.error("Invalid email or password")
+        else:
+            st.warning("Please enter email and password")
+    
+    st.markdown("<p style='text-align: center;'>------------ Or login with ------------</p>", unsafe_allow_html=True)
+    
+    if st.button("Sign in with Google", use_container_width=True):
+        login_with_google()
+    
+    if st.button("Forgot Password?"):
+        st.session_state["page"] = "forgot_password"
+        st.rerun()
+    
+def register_page():
+    st.title("Create Account")
+    
+    name = st.text_input("Name")  
+    email = st.text_input("Email")
+    password = st.text_input("Password", type="password")
+    confirm_password = st.text_input("Confirm Password", type="password")
+    
+    if st.button("Register", type="primary", use_container_width=True):
+        if email and name and password and confirm_password:
+            if len(password) < 8:
+                st.error("Password must be at least 8 characters long") 
+            elif password != confirm_password:
+                st.error("Passwords do not match")  
+            else:
+                user_data = {
+                    "email": email,
+                    "name": name,
+                    "password": password,
+                    "role": "User",  
+                    "status": "Active" 
+                }
+                response = requests.post(f"{BACKEND_URL}/users", json=user_data)
+                
+                if response.status_code == 201:
+                    st.success("Registration successful! Please login.")
+                    st.session_state.page = "login"
+                    st.rerun()
+                else:
+                    st.error("Registration failed. Please try again.")
+        else:
+            st.warning("Please fill all fields")
+
+    st.text("Already have an account?")
+    if st.button("Login"):
+        st.session_state.page = "login"
+        st.rerun()
+
+def forgot_password_page():
+    st.title("Forgot Password")
+    email = st.text_input("Enter your email")
+
+    if st.button("Send Reset Link", use_container_width=True):
+        if email:
+            with st.spinner("Sending reset link..."):
+                try:
+                    response = requests.post(f"{BACKEND_URL}/users/forgot-password", json={"email": email})
+                    if response.status_code == 200:
+                        st.success("Reset link has been sent to your email. Check your inbox.")
+                    elif response.status_code == 404:
+                        st.error("Email not found. Please check again.")
+                    else:
+                        st.error("An error occurred. Please try again later.")
+                except requests.exceptions.RequestException as e:
+                    st.error(f"Network error: {e}")
+        else:
+            st.warning("Please enter your email.")
+
+def reset_password_page():
+    st.title("Reset Password")
+    
+    if "reset_done" in st.session_state and st.session_state["reset_done"]:
+        st.session_state["page"] = "login"
+        st.query_params.clear()
+        st.rerun()
+        return  
+    
+    # Ambil token dari URL
+    query_params = st.query_params
+    token = query_params.get("token")  
+    
+    if not token:
+        st.error("Token tidak valid atau tidak ditemukan.")
+        return
+    
+    new_password = st.text_input("Enter your new password", type="password")
+    confirm_password = st.text_input("Confirm new password", type="password")
+    
+    if st.button("Reset Password", use_container_width=True):
+        if not new_password or not confirm_password:
+            st.warning("Please fill in all fields.")
+        elif new_password != confirm_password:
+            st.error("Passwords do not match.")
+        else:
+            with st.spinner("Resetting password..."):
+                response = requests.post(f"{BACKEND_URL}/users/reset-password", json={
+                    "token": token,
+                    "newPassword": new_password
+                })
+                
+                if response.status_code == 200:
+                    st.success("Your password has been reset successfully! You can now login.")
+                    
+                    st.session_state["reset_done"] = True
+                else:
+                    st.error("Failed to reset password. Token may be invalid or expired.")
+    
+    if st.button("Go to Login Page"):
+        st.session_state["reset_done"] = True  
+        st.rerun()
+
+
 if __name__ == "__main__":
-    main()
+    if "page" not in st.session_state:
+        st.session_state["page"] = "login"
+
+    query_params = st.query_params  
+    if "code" in query_params:
+        handle_google_callback()
+
+    if "token" in query_params:
+        st.session_state["page"] = "reset_password"
+
+    if st.session_state["page"] == "reset_password":
+        reset_password_page()
+    elif st.session_state["page"] == "main":
+        main()
+    elif st.session_state["page"] == "forgot_password":
+        forgot_password_page()
+    elif st.session_state["page"] == "register":
+        register_page()
+    else:
+        login_page()
+
+
+
+
+
