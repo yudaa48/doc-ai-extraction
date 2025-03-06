@@ -13,6 +13,7 @@ import datetime
 import pytz
 import google_auth_oauthlib.flow
 import webbrowser
+import time
 from google.cloud import storage, documentai
 from google.api_core.client_options import ClientOptions
 from typing import Dict, Any, Optional, List, Union, Union
@@ -1232,12 +1233,23 @@ def download_file_from_gcs(bucket_name: str, source_blob_name: str) -> bytes:
     return blob.download_as_bytes()
 
 def main():
-    st.write(f"Welcome, {st.session_state['user']['name']}!")
+    # st.write(f"Debug: Current Page - {st.session_state.get('page', 'Unknown')}")  # Debugging
+
+    if "user" in st.session_state and st.session_state["user"]:
+        st.write(f"Welcome, {st.session_state['user']['name']}!")
+    else:
+        st.warning("You are not logged in.")
+        st.session_state["page"] = "login"
+        st.rerun()  # Paksa redirect ke halaman login
 
     if st.button("Logout"):
-        st.session_state.clear()  
-        st.session_state["page"] = "login"  
-        st.query_params.clear() 
+        st.session_state.clear()
+        st.session_state["page"] = "login"
+        try:
+            st.query_params.clear() 
+        except:
+            st.experimental_set_query_params()  
+
         st.rerun()
 
 
@@ -1349,8 +1361,17 @@ def main():
 
 CLIENT_SECRETS_FILE = "client_secret_doc_ai_extraction.json"
 SCOPES = ["https://www.googleapis.com/auth/userinfo.profile", "https://www.googleapis.com/auth/userinfo.email", "openid"]
-BACKEND_URL = os.getenv("BACKEND_URL") 
+# BACKEND_URL = os.getenv("BACKEND_URL") 
+BACKEND_URL = "http://localhost:8080/api"
 REDIRECT_URI = os.getenv("REDIRECT_URI")
+
+def get_query_param(param_name):
+    """Mengambil query parameter dengan metode yang didukung di lokal & Cloud Run."""
+    try:
+        return st.query_params.get(param_name)  
+    except AttributeError: 
+        params = st.experimental_get_query_params()  
+        return params.get(param_name, [None])[0] 
 
 
 def login_with_google():
@@ -1361,7 +1382,6 @@ def login_with_google():
     
     authorization_url, state = flow.authorization_url(prompt="consent")
     
-    # Simpan state di session
     st.session_state["oauth_state"] = state
     st.session_state["oauth_flow"] = flow
     
@@ -1370,16 +1390,15 @@ def login_with_google():
 
 
 def handle_google_callback():
-    query_params = st.query_params
-    if "code" not in query_params:
+    code = get_query_param("code")
+    # st.write(f"Debug: Code received - {code}")   # Ambil kode dari query parameter
+
+    if not code:
         st.error("Authorization code not found.")
         return
 
     if "token" in st.session_state:
         return
-
-    code = query_params["code"]
-    # st.write(f"Authorization Code: {code}")  # Debugging
 
     if "oauth_flow" not in st.session_state:
         flow = google_auth_oauthlib.flow.Flow.from_client_secrets_file(
@@ -1407,6 +1426,10 @@ def handle_google_callback():
             st.session_state["user"] = data["user"]
             st.session_state["token"] = data["token"]
             st.session_state["page"] = "main"
+            # Debugging
+            # st.write("Debug: User data saved in session_state")
+            st.write(st.session_state)  
+
             st.success("Login successful! Redirecting...")
             st.rerun()
         else:
@@ -1418,22 +1441,22 @@ def handle_google_callback():
 # Halaman login manual (email & password)
 def login_page():
     st.title("Login Page")
+    if "page" not in st.session_state: 
+        st.session_state["page"] = "login"
+
     if "user" in st.session_state and st.session_state.get("user"):
         st.session_state["page"] = "main"
         st.rerun()
     
-    if "code" in st.query_params:
+    code = get_query_param("code")
+    if code:
         handle_google_callback()
+        st.rerun()
         
     st.text("Don't have an account?")
     if st.button("Register"):
         st.session_state["page"] = "register"
         st.rerun()
-
-    if "user" not in st.session_state:
-        st.session_state["user"] = {}
-    if "page" not in st.session_state:
-        st.session_state["page"] = "login"
 
     email = st.text_input("Email")
     password = st.text_input("Password", type="password")
@@ -1459,7 +1482,9 @@ def login_page():
     st.markdown("<p style='text-align: center;'>------------ Or login with ------------</p>", unsafe_allow_html=True)
     
     if st.button("Sign in with Google", use_container_width=True):
-        login_with_google()
+        if "google_login_clicked" not in st.session_state:
+            st.session_state["google_login_clicked"] = True
+            login_with_google()
     
     if st.button("Forgot Password?"):
         st.session_state["page"] = "forgot_password"
@@ -1526,16 +1551,21 @@ def forgot_password_page():
 def reset_password_page():
     st.title("Reset Password")
     
-    if "reset_done" in st.session_state and st.session_state["reset_done"]:
+    if st.session_state.get("reset_done"):
         st.session_state["page"] = "login"
-        st.query_params.clear()
+        st.query_params.update({})  
         st.rerun()
         return  
-    
-    # Ambil token dari URL
-    query_params = st.query_params
-    token = query_params.get("token")  
-    
+
+    # Ambil token dari URL dengan cara yang kompatibel
+    try:
+        query_params = st.query_params  
+    except:
+        query_params = st.experimental_get_query_params()  
+        
+    token = query_params.get("token", "")
+    # st.write(f"Debug: Token dari URL - {token}")
+    # st.write(f"Debug: Full Query Params - {query_params}")
     if not token:
         st.error("Token tidak valid atau tidak ditemukan.")
         return
@@ -1550,44 +1580,74 @@ def reset_password_page():
             st.error("Passwords do not match.")
         else:
             with st.spinner("Resetting password..."):
-                response = requests.post(f"{BACKEND_URL}/users/reset-password", json={
-                    "token": token,
-                    "newPassword": new_password
-                })
-                
-                if response.status_code == 200:
-                    st.success("Your password has been reset successfully! You can now login.")
+                try:
+                    response = requests.post(f"{BACKEND_URL}/users/reset-password", json={
+                        "token": token,
+                        "newPassword": new_password
+                    })
                     
-                    st.session_state["reset_done"] = True
-                else:
-                    st.error("Failed to reset password. Token may be invalid or expired.")
-    
-    if st.button("Go to Login Page"):
-        st.session_state["reset_done"] = True  
-        st.rerun()
+                    if response.status_code == 200:
+                        st.success("Your password has been reset successfully! Redirecting to login...")
+                        
+                        time.sleep(2)
+                        # Tandai bahwa reset password berhasil
+                        st.session_state["reset_done"] = True  
+
+                        try:
+                            st.query_params.clear()
+                        except:
+                            st.experimental_set_query_params()
+
+                        st.rerun()  # Redirect ke login
+                    else:
+                        error_message = response.json().get("message", "Failed to reset password.")
+                        st.error(f"Error: {error_message}")
+                except requests.exceptions.RequestException as e:
+                    st.error(f"Network error: {e}")
+
+    # if st.button("Go to Login Page"):
+    #     st.session_state["reset_done"] = True  
+    #     try:
+    #         st.query_params.clear()
+    #     except:
+    #         st.experimental_set_query_params()
+    #     st.rerun()
 
 
 if __name__ == "__main__":
     if "page" not in st.session_state:
         st.session_state["page"] = "login"
 
-    query_params = st.query_params  
-    if "code" in query_params:
-        handle_google_callback()
+    code = get_query_param("code")
+    if code:
+        handle_google_callback() 
 
-    if "token" in query_params:
+        # 🔹 Bersihkan query params agar kode tidak diproses ulang saat refresh
+        try:
+            st.query_params.clear()
+        except:
+            st.experimental_set_query_params()
+        
+        st.rerun() 
+
+    token = get_query_param("token")
+    if token:
         st.session_state["page"] = "reset_password"
 
-    if st.session_state["page"] == "reset_password":
-        reset_password_page()
-    elif st.session_state["page"] == "main":
+    # Arahkan ke halaman yang sesuai
+    page = st.session_state.get("page", "login")  
+    if page == "main":
         main()
-    elif st.session_state["page"] == "forgot_password":
+    elif page == "forgot_password":
         forgot_password_page()
-    elif st.session_state["page"] == "register":
+    elif page == "reset_password":
+        reset_password_page()
+    elif page == "register":
         register_page()
     else:
         login_page()
+
+
 
 
 
