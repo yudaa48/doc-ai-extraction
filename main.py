@@ -21,6 +21,7 @@ from PIL import Image
 from pdf2image import convert_from_path
 from google.oauth2 import id_token
 from dotenv import load_dotenv
+from datetime import datetime
 
 
 load_dotenv()
@@ -1287,9 +1288,10 @@ def main():
                 base_name, ext = os.path.splitext(original_filename)
                 output_filename = f"{base_name}_{timestamp}"
                 
-                # Save uploaded file
-                with open(input_filename, "wb") as f:
-                    f.write(uploaded_file.getvalue())
+                # Create a temporary file for the uploaded PDF
+                with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as temp_file:
+                    temp_file.write(uploaded_file.getvalue())
+                    input_filename = temp_file.name
                 
                 # Process document
                 print(f'path : {input_filename}')
@@ -1325,9 +1327,9 @@ def main():
                 st.error(f"Error processing document: {str(e)}")
                 st.session_state.processing_complete = False
             finally:
-                # Clean up
-                if os.path.exists(input_filename):
-                    os.remove(input_filename)
+                # Clean up the temporary file
+                if 'input_filename' in locals() and os.path.exists(input_filename):
+                    os.unlink(input_filename)
         else:
             st.warning("Please upload a PDF document")
     
@@ -1361,8 +1363,8 @@ def main():
 
 CLIENT_SECRETS_FILE = "client_secret_doc_ai_extraction.json"
 SCOPES = ["https://www.googleapis.com/auth/userinfo.profile", "https://www.googleapis.com/auth/userinfo.email", "openid"]
-# BACKEND_URL = os.getenv("BACKEND_URL") 
-BACKEND_URL = "http://localhost:8080/api"
+BACKEND_URL = os.getenv("BACKEND_URL") 
+# BACKEND_URL = "http://localhost:8080/api"
 REDIRECT_URI = os.getenv("REDIRECT_URI")
 
 def get_query_param(param_name):

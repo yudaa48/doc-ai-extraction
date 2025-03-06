@@ -1,27 +1,26 @@
 # Use an official Python runtime as a parent image
-FROM --platform=linux/amd64 python:3.9-slim
+FROM python:3.9-slim
 
-# Set the working directory in the container
 WORKDIR /app
 
 # Install system dependencies
-RUN apt-get update && apt-get install -y \
-    tempfile \
+RUN apt-get update && apt-get install -y --no-install-recommends \
     poppler-utils \
     build-essential \
     libpoppler-cpp-dev \
     pkg-config \
     python3-dev \
+    curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Upgrade pip
-RUN pip install --no-cache-dir --upgrade pip
+# Upgrade pip and install dependencies
+RUN pip install --no-cache-dir --upgrade pip setuptools
 
-# Copy requirements first to leverage Docker cache
+# Copy requirements first
 COPY requirements.txt /app/
 
-# Install Python dependencies
-RUN pip install --no-cache-dir -r requirements.txt
+# Install Python dependencies with verbose output and error handling
+RUN pip install --no-cache-dir -r requirements.txt || (cat /root/.pip/pip.log && false)
 
 # Copy the rest of the application
 COPY . /app
@@ -30,11 +29,9 @@ COPY . /app
 ENV PYTHONUNBUFFERED=1
 ENV STREAMLIT_SERVER_PORT=8080
 
-# Create a non-root user and switch to it
-RUN useradd -m -u 1000 appuser
-
-# Ensure the app directory is owned by appuser
-RUN chown -R appuser:appuser /app
+# Create a non-root user
+RUN useradd -m -u 1000 appuser \
+    && chown -R appuser:appuser /app
 
 USER appuser
 

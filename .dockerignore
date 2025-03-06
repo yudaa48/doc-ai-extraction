@@ -1,0 +1,33 @@
+# Version control
+.git
+.gitignore
+
+# Python
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+env/
+venv/
+.venv/
+
+# Dependencies
+*.egg-info/
+dist/
+build/
+
+# Temporary files
+*.log
+*.tmp
+page_splits/
+temp_output.xlsx
+
+# IDEs and editors
+.vscode/
+.idea/
+*.swp
+*~
+
+# OS generated files
+.DS_Store
+Thumbs.db
