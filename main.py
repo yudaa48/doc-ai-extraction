@@ -704,7 +704,7 @@ class DocumentAIProcessor:
                                                 "Page": page_num,
                                                 "Level": "Entity",
                                                 "Type": str(entity.get('type', '')).replace('_', f'{person_idx}_'),
-                                                "Value": entity.get('value', ''),
+                                                "Value": dictionary.lookup(dictionary, entity.get('type', ''), entity.get('value', '')),
                                                 "Confidence": f"{entity.get('confidence', 0):.2%}"
                                             }
                                             rows.append(entity_row)
