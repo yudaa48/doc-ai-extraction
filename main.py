@@ -13,6 +13,7 @@ import pytz
 import google_auth_oauthlib.flow
 import webbrowser
 import time
+import tempfile
 from google.cloud import storage, documentai
 from google.api_core.client_options import ClientOptions
 from typing import Dict, Any, Optional, List, Union, Union
