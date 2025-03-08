@@ -1267,7 +1267,7 @@ def main():
                     bucket_name=PROJECT_CONFIG['output_bucket'],
                     data=st.session_state.document_result,
                     filename=output_filename,
-                    prefix="output"
+                    prefix="prod-output"
                 )
                 
                 # Then save Excel
@@ -1275,10 +1275,10 @@ def main():
                     bucket_name=PROJECT_CONFIG['output_bucket'],
                     data=st.session_state.document_result,
                     filename=f"{output_filename}.xlsx",
-                    prefix="output"
+                    prefix="prod-output"
                 )
                 
-                st.session_state.excel_output_filename = f"output/{output_filename}.xlsx"
+                st.session_state.excel_output_filename = f"prod-output/{output_filename}.xlsx"  # Updated path
                 st.session_state.excel_gcs_uri = excel_gcs_uri
                 st.session_state.processing_complete = True
                 

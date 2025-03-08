@@ -32,6 +32,10 @@ ENV STREAMLIT_SERVER_PORT=8080
 
 # Create a non-root user and switch to it
 RUN useradd -m -u 1000 appuser
+
+# Ensure the app directory is owned by appuser
+RUN chown -R appuser:appuser /app
+
 USER appuser
 
 # Expose the port the app runs on
