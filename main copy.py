@@ -4,13 +4,13 @@ import json
 import os
 import shutil
 import PyPDF2
+import io
 from google.cloud import storage, documentai
 from google.api_core.client_options import ClientOptions
 from typing import Dict, Any, Optional, List, Union, Union
 from datetime import datetime
 from PIL import Image
 from pdf2image import convert_from_path
-from dictionary import Dictionary as dictionary
 
 # Predefined Configuration
 PROJECT_CONFIG = {
@@ -323,9 +323,19 @@ class DocumentAIProcessor:
                         'owner_lesse_tick_box','proof_of_fin_resp','investigation_complete']
         if types.lower() in elgible_type:
             return "true" if "☑" in string.lower() else "false"
-        return dictionary.lookup(dictionary, types, string)
+        return string
     
-    def extract_person_description(self, child_num: int, description: str) -> str:
+    def extract_person_description(self, description: str) -> str:
+        """
+        Extracts and formats person description details into a single string.
+        
+        Args:
+            description (str): The raw description string to process.
+            page_num (int): The page number for reference.
+        
+        Returns:
+            str: A formatted string containing all person description details.
+        """
         # Replace spaces with newline characters
         input_string = description.replace(' ', '\n')
         
@@ -339,32 +349,21 @@ class DocumentAIProcessor:
             'drug_result', 'drug_category', 'alc_result'
         ]
         
-        # Create a list to store child rows
-        child_rows = []
+        # Create a list to store formatted key-value pairs
+        formatted_details = []
         
-        # Iterate over the keys and values to create child rows
+        # Iterate over the keys and values to create formatted details
         for i, key in enumerate(keys):
             value = values[i] if i < len(values) else ''  # Get value or default to empty string
-            if value == '':
-                child_row = {
-                    "Page": child_num,
-                    "Level": "child",
-                    "Type": key,  # Use the key as the "Type"
-                    "Value": '',  # Use the corresponding value
-                    "Confidence": "100.00%"  # Default confidence (can be dynamic if needed)
-                }
+            if value:  # Only include non-empty values
+                formatted_details.append(f"{key}: {value}")
             else:
-                child_row = {
-                    "Page": child_num,
-                    "Level": "child",
-                    "Type": key,  # Use the key as the "Type"
-                    "Value": dictionary.lookup(dictionary, key, value),  # Use the corresponding value
-                    "Confidence": "100.00%"  # Default confidence (can be dynamic if needed)
-                }
-            child_rows.append(child_row)
+                formatted_details.append(f"{key}: ")
         
-        return child_rows
-
+        # Combine the formatted details into a single string
+        formatted_description = "; \n".join(formatted_details)
+        
+        return formatted_description
     
     def save_json_to_gcs(self, bucket_name: str, data: Dict[str, Any], filename: str, prefix: str = '') -> str:
         """Save JSON data to Google Cloud Storage with section-based organization"""
@@ -407,172 +406,184 @@ class DocumentAIProcessor:
                 for page in data.get("pages", []):
                     page_num = page["page_number"]
                     
-                    # Initialize an empty dictionary to store street address components
-                    street_address = {}
+                    # Process identification_location sections
+                    id_locations = page.get("hierarchical_fields", {}).get("identification_location", [])
+                    if id_locations:
+                        sheet_name = f"P{page_num}_identification_location"[:31]
+                        rows = []
+                        
+                        # Process each identification_location section
+                        section_names = ["General Information", "Road of Crash", "Intersecting Road"]
+                        for idx, location in enumerate(id_locations):
+                            section_header = {
+                                "Page": page_num,
+                                "Level": "Section Header",
+                                "Type": section_names[idx],
+                                "Value": "",
+                                "Confidence": ""
+                            }
+                            rows.append(section_header)
+                        
+                            # Process fields within each section
+                            # Initialize an empty dictionary to store street address components
+                            street_address = {}
 
-                    # Tracking unique identifiers for sections
-                    section_unique_trackers = {}
+                            # Define eligible field types for street address components
+                            eligible_types = ["block_num", "street_name", "street_prefix", "street_suffix"]
 
+                            # identification information - general info
+                            general_info = ["crash_date","crash_time","case_id","local_use","country_name",
+                                            "city_name","outside_city_limit","crash_damage_1000","latitude","longitude"]
+                            
+                            # identification information - road of crash
+                            road_of_crash = ["rdwy_sys","hwy_num","rdwy_part","block_num","street_prefix",
+                                            "street_name","street_suffix","dir_of_traffic","speed_limit","const_zone",
+                                            "worker_present","street_desc"]
+
+                            # identification information - intersect road
+                            intersect_road = ["rdwy_sys","hwy_num","rdwy_part","block_num","street_prefix","street_name",
+                                            "street_suffix","distance_from_int_of_ref_marker","dir_from_int_or_ref_marker","ref_marker",
+                                            "speed_limit","street_desc","rrx_num"]
+
+                            # Loop through child fields in the location dictionary
+                            for field_type, field_entries in location.get("child_fields", {}).items():
+                                # Convert field_type to lowercase for case-insensitive comparison
+                                field_type_lower = field_type.lower()
+
+                                # Loop through each entry in the field_entries list
+                                for entry in field_entries:
+                                    if section_names[idx] == "General Information" and field_type_lower in general_info:
+                                        field_row = {
+                                            "Page": page_num,
+                                            "Level": "Field",
+                                            "Type": field_type,
+                                            "Value": self.match_string_for_boolean(field_type, entry.get("value", "")),
+                                            "Confidence": f"{entry.get('confidence', 0):.2%}"
+                                        }
+
+                                        rows.append(field_row)
+                                    
+                                    if section_names[idx] == "Road of Crash" and field_type_lower in road_of_crash:
+                                        print(field_type_lower)
+                                        # If the field type is not eligible, add it to the rows list
+                                        if field_type_lower not in eligible_types:
+                                            field_row = {
+                                                "Page": page_num,
+                                                "Level": "Field",
+                                                "Type": field_type,
+                                                "Value": self.match_string_for_boolean(field_type, entry.get("value", "")),
+                                                "Confidence": f"{entry.get('confidence', 0):.2%}"
+                                            }
+                                            rows.append(field_row)
+                                        else:
+                                            # If the field type is 'street_suffix', construct the full street address
+                                            if field_type_lower == "street_suffix":
+                                                # Construct the full street address using components from street_address
+                                                full_address = (
+                                                    f'{street_address.get("block_num", "")} '
+                                                    f'{street_address.get("street_prefix", "")} '
+                                                    f'{street_address.get("street_name", "")} '
+                                                    f'{entry.get("value", "")}'
+                                                ).strip()  # Remove any extra spaces
+
+                                                # Add the full street address to the rows list
+                                                field_row = {
+                                                    "Page": page_num,
+                                                    "Level": "Field",
+                                                    "Type": "street_address",
+                                                    "Value": full_address,
+                                                    "Confidence": f"{entry.get('confidence', 0):.2%}"
+                                                }
+                                                rows.append(field_row)
+                                            else:
+                                                # Store the value in the street_address dictionary for later use
+                                                street_address[field_type_lower] = entry.get("value", "")
+
+                                    if section_names[idx] == "Intersecting Road" and field_type_lower in intersect_road:
+                                        # If the field type is not eligible, add it to the rows list
+                                        if field_type_lower not in eligible_types:
+                                            field_row = {
+                                                "Page": page_num,
+                                                "Level": "Field",
+                                                "Type": field_type,
+                                                "Value": self.match_string_for_boolean(field_type, entry.get("value", "")),
+                                                "Confidence": f"{entry.get('confidence', 0):.2%}"
+                                            }
+                                            rows.append(field_row)
+                                        else:
+                                            # If the field type is 'street_suffix', construct the full street address
+                                            if field_type_lower == "street_suffix":
+                                                # Construct the full street address using components from street_address
+                                                full_address = (
+                                                    f'{street_address.get("block_num", "")} '
+                                                    f'{street_address.get("street_prefix", "")} '
+                                                    f'{street_address.get("street_name", "")} '
+                                                    f'{entry.get("value", "")}'
+                                                ).strip()  # Remove any extra spaces
+
+                                                # Add the full street address to the rows list
+                                                field_row = {
+                                                    "Page": page_num,
+                                                    "Level": "Field",
+                                                    "Type": "street_address",
+                                                    "Value": full_address,
+                                                    "Confidence": f"{entry.get('confidence', 0):.2%}"
+                                                }
+                                                rows.append(field_row)
+                                            else:
+                                                # Store the value in the street_address dictionary for later use
+                                                street_address[field_type_lower] = entry.get("value", "")
+
+                                    
+                            
+                            # Add separator after each section
+                            separator_row = {
+                                "Page": page_num,
+                                "Level": "Separator",
+                                "Type": "",
+                                "Value": "",
+                                "Confidence": ""
+                            }
+                            rows.append(separator_row)
+                        
+                        if rows:
+                            df = pd.DataFrame(rows)
+                            df.to_excel(writer, sheet_name=sheet_name, index=False)
+                            
+                            # Format the worksheet
+                            worksheet = writer.sheets[sheet_name]
+                            workbook = writer.book
+                            
+                            # Create formats
+                            header_format = workbook.add_format({
+                                'bold': True,
+                                'bg_color': '#D3D3D3',
+                                'align': 'center'
+                            })
+                            
+                            separator_format = workbook.add_format({
+                                'bottom': 1
+                            })
+                            
+                            # Apply formats
+                            for row_idx, row in enumerate(rows, 1):
+                                if row.get('Level') == 'Section Header':
+                                    worksheet.set_row(row_idx, None, header_format)
+                                elif row.get('Level') == 'Separator':
+                                    worksheet.set_row(row_idx, None, separator_format)
+                            
+                            # Adjust column widths
+                            self._adjust_column_widths(writer, sheet_name, df)
+                    
                     # Process other sections (vehicle_driver_persons, etc.)
                     for parent_type, parent_entities in page.get("hierarchical_fields", {}).items():
                         # Skip identification_location as it's already processed
                         if parent_type == 'identification_location':
-                            # Create a separate sheet for each parent entity
-                            for parent_idx, parent_entity in enumerate(parent_entities, 1):
-                                sheet_name = f"P{page_num}_identification_location_{parent_idx}"[:31]
-                                rows = []
-
-                                # Process each identification_location section
-                                section_names = ["General Information", "Road of Crash", "Intersecting Road"]
-
-                                # Define eligible field types for street address components
-                                eligible_types = ["block_num", "street_name", "street_prefix", "street_suffix"]
-
-                                # identification information - general info
-                                general_info = ["crash_date","crash_time","case_id","local_use","country_name",
-                                                "city_name","outside_city_limit","crash_damage_1000","latitude","longitude"]
-                                
-                                # identification information - road of crash
-                                road_of_crash = ["rdwy_sys","hwy_num","rdwy_part","block_num","street_prefix",
-                                                "street_name","street_suffix","dir_of_traffic","speed_limit","const_zone",
-                                                "worker_present","street_desc"]
-
-                                # identification information - intersect road
-                                intersect_road = ["rdwy_sys","hwy_num","rdwy_part","block_num","street_prefix","street_name",
-                                                "street_suffix","distance_from_int_of_ref_marker","dir_from_int_or_ref_marker","ref_marker",
-                                                "speed_limit","street_desc","rrx_num"]
-
-                                for section in section_names:
-                                    section_header = {
-                                        "Page": page_num,
-                                        "Level": "Section Header",
-                                        "Type": section,
-                                        "Value": "",
-                                        "Confidence": ""
-                                    }
-                                    rows.append(section_header)
-
-                                    for child_type, child_entries in parent_entity.get("child_fields", {}).items():
-                                        # Loop through each entry in the field_entries list
-                                        for entry in child_entries:
-                                            if section == "General Information" and child_type in general_info:
-                                                field_row = {
-                                                    "Page": page_num,
-                                                    "Level": "Field",
-                                                    "Type": child_type,
-                                                    "Value": self.match_string_for_boolean(child_type, entry.get("value", "")),
-                                                    "Confidence": f"{entry.get('confidence', 0):.2%}"
-                                                }
-
-                                                rows.append(field_row)
-                                            
-                                            if section == "Road of Crash" and child_type in road_of_crash:
-                                                # If the field type is not eligible, add it to the rows list
-                                                if child_type not in eligible_types:
-                                                    field_row = {
-                                                        "Page": page_num,
-                                                        "Level": "Field",
-                                                        "Type": child_type,
-                                                        "Value": self.match_string_for_boolean(child_type, entry.get("value", "")),
-                                                        "Confidence": f"{entry.get('confidence', 0):.2%}"
-                                                    }
-                                                    rows.append(field_row)
-                                                else:
-                                                    # If the field type is 'street_suffix', construct the full street address
-                                                    if child_type == "street_suffix":
-                                                        # Construct the full street address using components from street_address
-                                                        full_address = (
-                                                            f'{street_address.get("block_num", "")} '
-                                                            f'{street_address.get("street_prefix", "")} '
-                                                            f'{street_address.get("street_name", "")} '
-                                                            f'{entry.get("value", "")}'
-                                                        ).strip()  # Remove any extra spaces
-
-                                                        # Add the full street address to the rows list
-                                                        field_row = {
-                                                            "Page": page_num,
-                                                            "Level": "Field",
-                                                            "Type": "street_address",
-                                                            "Value": full_address,
-                                                            "Confidence": f"{entry.get('confidence', 0):.2%}"
-                                                        }
-                                                        rows.append(field_row)
-                                                    else:
-                                                        # Store the value in the street_address dictionary for later use
-                                                        street_address[child_type] = entry.get("value", "")
-
-                                            if section == "Intersecting Road" and child_type in intersect_road:
-                                                # If the field type is not eligible, add it to the rows list
-                                                if child_type not in eligible_types:
-                                                    field_row = {
-                                                        "Page": page_num,
-                                                        "Level": "Field",
-                                                        "Type": child_type,
-                                                        "Value": self.match_string_for_boolean(child_type, entry.get("value", "")),
-                                                        "Confidence": f"{entry.get('confidence', 0):.2%}"
-                                                    }
-                                                    rows.append(field_row)
-                                                else:
-                                                    # If the field type is 'street_suffix', construct the full street address
-                                                    if child_type == "street_suffix":
-                                                        # Construct the full street address using components from street_address
-                                                        full_address = (
-                                                            f'{street_address.get("block_num", "")} '
-                                                            f'{street_address.get("street_prefix", "")} '
-                                                            f'{street_address.get("street_name", "")} '
-                                                            f'{entry.get("value", "")}'
-                                                        ).strip()  # Remove any extra spaces
-
-                                                        # Add the full street address to the rows list
-                                                        field_row = {
-                                                            "Page": page_num,
-                                                            "Level": "Field",
-                                                            "Type": "street_address",
-                                                            "Value": full_address,
-                                                            "Confidence": f"{entry.get('confidence', 0):.2%}"
-                                                        }
-                                                        rows.append(field_row)
-                                                    else:
-                                                        # Store the value in the street_address dictionary for later use
-                                                        street_address[child_type] = entry.get("value", "")
-
-                                # Add separator
-                                rows.append({
-                                    "Page": page_num,
-                                    "Level": "Separator",
-                                    "Type": "",
-                                    "Value": "",
-                                    "Confidence": ""
-                                })
-                                if rows:
-                                    df = pd.DataFrame(rows)
-                                    df.to_excel(writer, sheet_name=sheet_name, index=False)
-                                    
-                                    # Format the worksheet
-                                    worksheet = writer.sheets[sheet_name]
-                                    workbook = writer.book
-                                    
-                                    # Create formats
-                                    header_format = workbook.add_format({
-                                        'bold': True,
-                                        'bg_color': '#D3D3D3',
-                                        'align': 'center'
-                                    })
-                                    
-                                    separator_format = workbook.add_format({
-                                        'bottom': 1
-                                    })
-                                    
-                                    # Apply formats
-                                    for row_idx, row in enumerate(rows, 1):
-                                        if row.get('Level') == 'Section Header':
-                                            worksheet.set_row(row_idx, None, header_format)
-                                        elif row.get('Level') == 'Separator':
-                                            worksheet.set_row(row_idx, None, separator_format)
-                                    
-                                    # Adjust column widths
-                                    self._adjust_column_widths(writer, sheet_name, df)
-
+                            continue
+                            
+                        # Tracking unique identifiers for sections
+                        section_unique_trackers = {}
+                        
                         if parent_type == 'vehicle_driver_persons':
                             # Create a separate sheet for each parent entity
                             for parent_idx, parent_entity in enumerate(parent_entities, 1):
@@ -605,25 +616,28 @@ class DocumentAIProcessor:
                                             rows.append(person_header_row)
                                             
                                             # Process person entities
-                                            person_description = []
                                             for entity in child_entry.get("entities", []):
                                                 # Create entity_row with person_idx appended to the type
+                                                entity_row = {}
                                                 if entity.get('type', '') == 'person_description':
-                                                    person_description.append(self.extract_person_description(page_num, entity.get('value', '')))
+                                                    entity_row = {
+                                                        "Page": page_num,
+                                                        "Level": "Entity",
+                                                        "Type": str(entity.get('type', '')).replace('_', f'{person_idx}_'),
+                                                        "Value": self.extract_person_description(entity.get('value', '')),
+                                                        "Confidence": f"{entity.get('confidence', 0):.2%}"
+                                                    }
                                                 else:
                                                     entity_row = {
                                                         "Page": page_num,
                                                         "Level": "Entity",
                                                         "Type": str(entity.get('type', '')).replace('_', f'{person_idx}_'),
-                                                        "Value": self.match_string_for_boolean(entity.get('type', ''), entity.get('value', '')),
+                                                        "Value": entity.get('value', ''),
                                                         "Confidence": f"{entity.get('confidence', 0):.2%}"
                                                     }
-                                                    
-                                                    # Append the entity_row to the rows list
-                                                    rows.append(entity_row)
-                                            
-                                            for person in person_description[0]:
-                                                rows.append(person)
+                                                
+                                                # Append the entity_row to the rows list
+                                                rows.append(entity_row)
                                             
                                             # Add separator
                                             rows.append({
@@ -669,7 +683,7 @@ class DocumentAIProcessor:
                                             worksheet.set_row(row_idx, None, separator_format)
                                     
                                     self._adjust_column_widths(writer, sheet_name, df)
-                        elif parent_type != 'identification_location':
+                        else:
                             # Handle other section types
                             if parent_type not in section_unique_trackers:
                                 section_unique_trackers[parent_type] = 0
