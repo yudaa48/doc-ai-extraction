@@ -22,6 +22,7 @@ from pdf2image import convert_from_path
 from google.oauth2 import id_token
 from dotenv import load_dotenv
 from datetime import datetime
+from dictionary import Dictionary as dictionary
 
 
 load_dotenv()
