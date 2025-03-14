@@ -11,6 +11,7 @@ from datetime import datetime
 from PIL import Image
 from pdf2image import convert_from_path
 from dictionary import Dictionary as dictionary
+from geocoding import Geocoding as geocoding
 
 # Predefined Configuration
 PROJECT_CONFIG = {
@@ -488,15 +489,17 @@ class DocumentAIProcessor:
                                                             f'{entry.get("value", "")}'
                                                         ).strip()  # Remove any extra spaces
 
-                                                        # Add the full street address to the rows list
-                                                        field_row = {
-                                                            "Page": page_num,
-                                                            "Level": "Field",
-                                                            "Type": "street_address",
-                                                            "Value": full_address,
-                                                            "Confidence": f"{entry.get('confidence', 0):.2%}"
-                                                        }
-                                                        rows.append(field_row)
+                                                        geocode_res = geocoding.call(geocoding, full_address)
+                                                        for geocode in geocode_res:
+                                                            for key, value in geocode.items():
+                                                                field_row = {
+                                                                    "Page": page_num,
+                                                                    "Level": "Field",
+                                                                    "Type": key,
+                                                                    "Value": value,
+                                                                    "Confidence": ""
+                                                                }
+                                                                rows.append(field_row)
                                                     else:
                                                         # Store the value in the street_address dictionary for later use
                                                         street_address[child_type] = entry.get("value", "")
@@ -621,9 +624,10 @@ class DocumentAIProcessor:
                                                     
                                                     # Append the entity_row to the rows list
                                                     rows.append(entity_row)
-                                            
-                                            for person in person_description[0]:
-                                                rows.append(person)
+
+                                            if len(person_description) > 0:    
+                                                for person in person_description[0]:
+                                                    rows.append(person)
                                             
                                             # Add separator
                                             rows.append({
@@ -704,7 +708,7 @@ class DocumentAIProcessor:
                                                 "Page": page_num,
                                                 "Level": "Entity",
                                                 "Type": str(entity.get('type', '')).replace('_', f'{person_idx}_'),
-                                                "Value": dictionary.lookup(dictionary, entity.get('type', ''), entity.get('value', '')),
+                                                "Value": self.match_string_for_boolean(entity.get('type', ''), entity.get('value', '')),
                                                 "Confidence": f"{entity.get('confidence', 0):.2%}"
                                             }
                                             rows.append(entity_row)
