@@ -1,7 +1,7 @@
 import requests
 
 class Geocoding:
-    def call(self, address: str) -> any:
+    def call(self, parent: str, address: str) -> any:
         # Prepare the URL and parameters
         url = 'https://maps.googleapis.com/maps/api/geocode/json'
         params = {
@@ -16,31 +16,25 @@ class Geocoding:
         if response.status_code == 200:
             # Parse and return the JSON response
             res = response.json()
-            return self.extract_location_details(res)
+            return self.extract_location_details(parent,res)
         else:
             # Handle the case when the API request fails
             print("Error: Unable to get a response from Google Maps API.")
             return None
 
-    def extract_location_details(data):
+    def extract_location_details(parent: str, data):
         details = []
         
         for result in data.get("results", []):
             # Extract address components
             address_components = result.get("address_components", [])
             county_full = None
-            county_short = None
-            county_fisp_code = None
             for component in address_components:
                 if "administrative_area_level_2" in component["types"]:
                     county_full = component["long_name"]
-                    county_short = component["short_name"]
             
             # Extract geometry
             geometry = result.get("geometry", {})
-            location = geometry.get("location", {})
-            latitude = location.get("lat")
-            longitude = location.get("lng")
             
             # Extract location type and fallback
             location_type = geometry.get("location_type")
@@ -57,13 +51,8 @@ class Geocoding:
             
             # Collect the extracted details for each result
             details.append({
-                "county_full": county_full,
-                "county_short": county_short,
-                "county_fisp_code": county_fisp_code,  # If available from other sources, add it here
-                "state": next((comp["short_name"] for comp in address_components if "administrative_area_level_1" in comp["types"]), None),
-                "latitude": latitude,
-                "longitude": longitude,
-                "location_type": location_type
+                f"{parent}_county_full": county_full,
+                f"{parent}_state": next((comp["short_name"] for comp in address_components if "administrative_area_level_1" in comp["types"]), None),
             })
         
         return details
