@@ -6,7 +6,7 @@ class Geocoding:
         url = 'https://maps.googleapis.com/maps/api/geocode/json'
         params = {
             'address': address,
-            'key': 'AIzaSyA90n2r8dvt8TKUU8viSWLS1CBs_84ofMQ'
+            'key': ''
         }
         
         # Make the GET request
