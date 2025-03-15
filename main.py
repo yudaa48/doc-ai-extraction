@@ -430,7 +430,8 @@ class DocumentAIProcessor:
                                 eligible_types = ["block_num", "street_name", "street_prefix", "street_suffix"]
 
                                 # Define elgible field for geocoding
-                                eligible_geocoding = ["country_name"]
+                                geocoding_temp_address = ""
+                                eligible_geocoding = ["city_name", "country_name"]
 
                                 # identification information - general info
                                 general_info = ["crash_date","crash_time","case_id","local_use","country_name",
@@ -471,18 +472,22 @@ class DocumentAIProcessor:
                                                 rows.append(field_row)
 
                                                 if child_type in eligible_geocoding:
-                                                    geocode_res = geocoding.call(geocoding, child_type, entry.get("value", ""))
-                                                    for geocode in geocode_res:
-                                                        for key, value in geocode.items():
-                                                            field_row = {
-                                                                "Page": page_num,
-                                                                "Level": "Field",
-                                                                "Type": key,
-                                                                "Value": value,
-                                                                "Confidence": ""
-                                                            }
+                                                    if entry.get("type", "") == 'city_name':
+                                                        geocoding_temp_address += entry.get("value", "") + ", "
+                                                    else:
+                                                        geocoding_temp_address +=  entry.get("value", "")
+                                                        geocode_res = geocoding.call(geocoding, child_type, geocoding_temp_address)
+                                                        for geocode in geocode_res:
+                                                            for key, value in geocode.items():
+                                                                field_row = {
+                                                                    "Page": page_num,
+                                                                    "Level": "Field",
+                                                                    "Type": key,
+                                                                    "Value": value,
+                                                                    "Confidence": ""
+                                                                }
 
-                                                            rows.append(field_row)
+                                                                rows.append(field_row)
                                             
                                             if section == "Road of Crash" and child_type in road_of_crash:
                                                 # If the field type is not eligible, add it to the rows list

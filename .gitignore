@@ -1,3 +1,4 @@
 neon-camp-449123-j1-ac5287aca4bd.json
 *.zip
 deploy.sh
+.env
