@@ -1,4 +1,8 @@
 import requests
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
 
 class Geocoding:
     def call(self, parent: str, address: str) -> any:
@@ -6,7 +10,7 @@ class Geocoding:
         url = 'https://maps.googleapis.com/maps/api/geocode/json'
         params = {
             'address': address,
-            'key': ''
+            'key': os.getenv("API_KEY")
         }
         
         # Make the GET request
