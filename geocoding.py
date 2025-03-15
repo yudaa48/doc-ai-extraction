@@ -15,7 +15,6 @@ class Geocoding:
         
         # Make the GET request
         response = requests.get(url, params=params)
-        
         # Check for a successful response
         if response.status_code == 200:
             # Parse and return the JSON response
@@ -39,6 +38,9 @@ class Geocoding:
             
             # Extract geometry
             geometry = result.get("geometry", {})
+            location = geometry.get("location", {})
+            latitude = location.get("lat")
+            longitude = location.get("lng")
             
             # Extract location type and fallback
             location_type = geometry.get("location_type")
@@ -57,6 +59,7 @@ class Geocoding:
             details.append({
                 f"{parent}_county_full": county_full,
                 f"{parent}_state": next((comp["short_name"] for comp in address_components if "administrative_area_level_1" in comp["types"]), None),
+                f"{parent}_url_map": f"https://www.google.com/maps?q={latitude},{longitude}",
             })
         
         return details
