@@ -24,10 +24,7 @@ from dotenv import load_dotenv
 from datetime import datetime
 from dictionary import Dictionary as dictionary
 
-
 load_dotenv()
-
-from dictionary import Dictionary as dictionary
 
 # Predefined Configuration
 PROJECT_CONFIG = {
