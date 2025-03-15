@@ -23,6 +23,7 @@ from google.oauth2 import id_token
 from dotenv import load_dotenv
 from datetime import datetime
 from dictionary import Dictionary as dictionary
+from geocoding import Geocoding as geocoding
 
 load_dotenv()
 
@@ -442,6 +443,9 @@ class DocumentAIProcessor:
                                 # Define eligible field types for street address components
                                 eligible_types = ["block_num", "street_name", "street_prefix", "street_suffix"]
 
+                                # Define elgible field for geocoding
+                                eligible_geocoding = ["country_name"]
+
                                 # identification information - general info
                                 general_info = ["crash_date","crash_time","case_id","local_use","country_name",
                                                 "city_name","outside_city_limit","crash_damage_1000","latitude","longitude"]
@@ -479,6 +483,20 @@ class DocumentAIProcessor:
                                                 }
 
                                                 rows.append(field_row)
+
+                                                if child_type in eligible_geocoding:
+                                                    geocode_res = geocoding.call(geocoding, child_type, entry.get("value", ""))
+                                                    for geocode in geocode_res:
+                                                        for key, value in geocode.items():
+                                                            field_row = {
+                                                                "Page": page_num,
+                                                                "Level": "Field",
+                                                                "Type": key,
+                                                                "Value": value,
+                                                                "Confidence": ""
+                                                            }
+
+                                                            rows.append(field_row)
                                             
                                             if section == "Road of Crash" and child_type in road_of_crash:
                                                 # If the field type is not eligible, add it to the rows list
@@ -501,7 +519,7 @@ class DocumentAIProcessor:
                                                             f'{street_address.get("street_name", "")} '
                                                             f'{entry.get("value", "")}'
                                                         ).strip()  # Remove any extra spaces
-
+                                                        
                                                         # Add the full street address to the rows list
                                                         field_row = {
                                                             "Page": page_num,
@@ -591,6 +609,8 @@ class DocumentAIProcessor:
                             # Create a separate sheet for each parent entity
                             for parent_idx, parent_entity in enumerate(parent_entities, 1):
                                 sheet_name = f"P{page_num}_vehicle_driver_{parent_idx}"[:31]
+                                eligible_geocoding = ["address", "owner_address"]
+
                                 rows = []
                                 
                                 # Add parent information
@@ -635,9 +655,10 @@ class DocumentAIProcessor:
                                                     
                                                     # Append the entity_row to the rows list
                                                     rows.append(entity_row)
-                                            
-                                            for person in person_description[0]:
-                                                rows.append(person)
+
+                                            if len(person_description) > 0:    
+                                                for person in person_description[0]:
+                                                    rows.append(person)
                                             
                                             # Add separator
                                             rows.append({
@@ -658,6 +679,21 @@ class DocumentAIProcessor:
                                                 "Confidence": f"{child_entry.get('confidence', 0):.2%}"
                                             }
                                             rows.append(child_row)
+
+                                            if child_type in eligible_geocoding:
+                                                geocode_res = geocoding.call(geocoding, child_type, child_entry.get("value", ""))
+                                                for geocode in geocode_res:
+                                                    for key, value in geocode.items():
+                                                        field_row = {
+                                                            "Page": page_num,
+                                                            "Level": "Child",
+                                                            "Type": key,
+                                                            "Value": value,
+                                                            "Confidence": ""
+                                                        }
+
+                                                        rows.append(field_row)
+
                                 
                                 if rows:
                                     df = pd.DataFrame(rows)
@@ -718,7 +754,7 @@ class DocumentAIProcessor:
                                                 "Page": page_num,
                                                 "Level": "Entity",
                                                 "Type": str(entity.get('type', '')).replace('_', f'{person_idx}_'),
-                                                "Value": dictionary.lookup(dictionary, entity.get('type', ''), entity.get('value', '')),
+                                                "Value": self.match_string_for_boolean(entity.get('type', ''), entity.get('value', '')),
                                                 "Confidence": f"{entity.get('confidence', 0):.2%}"
                                             }
                                             rows.append(entity_row)

@@ -99,8 +99,11 @@ class Dictionary:
         if type == 'surface_condition':
             return self.surface_condition(self, code)
         
-        if type == 'traffic_condition':
-            return self.traffic_condition(self, code)
+        if type == 'traffic_control':
+            return self.traffic_conntrol(self, code)
+        
+        if type == 'unit_num_contributing' or type == 'contributing_contributing_factors':
+            return self.factor_n_condition(self, code)
 
         return code
         
@@ -807,8 +810,8 @@ class Dictionary:
 
         return surface_condition.get(code)
 
-    def traffic_condition(self, code: str) -> str:
-        traffic_condition = {
+    def traffic_conntrol(self, code: str) -> str:
+        traffic_conntrol = {
             "2": "Inoperative (Explain in Narrative)",
             "3": "Officer",
             "4": "Flagman",
@@ -829,7 +832,84 @@ class Dictionary:
             "98": "Other (Explain in Narrative)"
         }
 
-        return traffic_condition.get(code)
+        return traffic_conntrol.get(code)
+    
+    def factor_n_condition(self, code: str) -> str:
+        factor_n_condition = {
+            1: "Animal on Road - Domestic",
+            2: "Animal on Road - Wild",
+            3: "Backed without Safety",
+            4: "Changed Lane when Unsafe",
+            14: "Disabled in Traffic Lane",
+            15: "Disregard Stop and Go Signal",
+            16: "Disregard Stop Sign or Light",
+            17: "Disregard Turn Marks at Intersection",
+            18: "Disregard Warning Sign at Construction",
+            19: "Distraction in Vehicle",
+            20: "Driver Inattention",
+            21: "Drove Without Headlights",
+            22: "Failed to Control Speed",
+            23: "Failed to Drive in Single Lane",
+            24: "Failed to Give Half of Roadway",
+            25: "Failed to Heed Warning Sign or Traffic Control Device",
+            26: "Failed to Pass to Left Safely",
+            27: "Failed to Pass to Right Safely",
+            28: "Failed to Signal or Gave Wrong Signal",
+            29: "Failed to Stop at Proper Place",
+            30: "Failed to Stop for School Bus",
+            31: "Failed to Stop for Train",
+            32: "Failed to Yield ROW - Emergency Vehicle",
+            33: "Failed to Yield ROW - Open Intersection",
+            34: "Failed to Yield ROW - Private Drive",
+            35: "Failed to Yield ROW - Stop Sign",
+            36: "Failed to Yield ROW - To Pedestrian",
+            37: "Failed to Yield ROW - Turning Left",
+            38: "Failed to Yield ROW - Turn on Red",
+            39: "Failed to Yield ROW - Yield Sign",
+            40: "Fatigued or Asleep",
+            41: "Faulty Evasive Action",
+            42: "Fire in Vehicle",
+            43: "Fleeing or Evading Police",
+            44: "Followed Too Closely",
+            45: "Had Been Drinking",
+            46: "Handicapped Driver (Explain in Narrative)",
+            47: "Ill (Explain in Narrative)",
+            48: "Impaired Visibility (Explain in Narrative)",
+            49: "Improper Start from a Stopped, Standing, or Parked Position",
+            50: "Load Not Secured",
+            51: "Opened Door Into Traffic Lane",
+            52: "Oversized Vehicle or Load",
+            53: "Overtake and Pass Insufficient Clearance",
+            54: "Parked and Failed to Set Brakes",
+            55: "Parked in Traffic Lane",
+            56: "Parked without Lights",
+            57: "Passed in No Passing Lane",
+            58: "Passed on Shoulder",
+            59: "Pedestrian FTYROW to Vehicle",
+            60: "Unsafe Speed",
+            61: "Speeding - (Over Limit)",
+            62: "Taking Medication (Explain in Narrative)",
+            63: "Turned Improperly - Cut Corner on Left",
+            64: "Turned Improperly - Wide Right",
+            65: "Turned Improperly - Wrong Lane",
+            66: "Turned when Unsafe",
+            67: "Intoxicated - Alcohol",
+            68: "Intoxicated - Drug",
+            69: "Wrong Side - Approach or Intersection",
+            70: "Wrong Side - Not Passing",
+            71: "Wrong Way - One Way Road",
+            73: "Road Rage",
+            74: "Cell/Mobile Device Use - Talking",
+            75: "Cell/Mobile Device Use - Texting",
+            76: "Cell/Mobile Device Use - Other",
+            77: "Cell/Mobile Device Use - Unknown",
+            78: "Failed to slow or move over for vehicles displaying emergency lights",
+            79: "Drove on improved shoulder",
+            98: "Other (Explain in Narrative)"
+        }
+
+        return factor_n_condition.get(code)
+
 
 
 
