@@ -734,7 +734,21 @@ class DocumentAIProcessor:
                                             "Confidence": f"{child_entry.get('confidence', 0):.2%}"
                                         }
                                         rows.append(child_row)
-                                        
+
+                                        if child_type in eligible_geocoding:
+                                            geocode_res = geocoding.call(geocoding, child_type, child_entry.get("value", ""))
+                                            for geocode in geocode_res:
+                                                for key, value in geocode.items():
+                                                    field_row = {
+                                                        "Page": page_num,
+                                                        "Level": "Child",
+                                                        "Type": key,
+                                                        "Value": value,
+                                                        "Confidence": ""
+                                                    }
+
+                                                    rows.append(field_row)
+                                            
                                         for entity in child_entry.get("entities", []):
                                             entity_row = {
                                                 "Page": page_num,
