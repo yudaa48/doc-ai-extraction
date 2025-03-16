@@ -492,11 +492,11 @@ class DocumentAIProcessor:
                                                 "speed_limit","street_desc","rrx_num"]
 
                                 for section in section_names:
-                                    section_header = {
-                                        "Type": section,
-                                        "Value": ""
-                                    }
-                                    rows.append(section_header)
+                                    # section_header = {
+                                    #     "Type": section,
+                                    #     "Value": ""
+                                    # }
+                                    # rows.append(section_header)
 
                                     for child_type, child_entries in parent_entity.get("child_fields", {}).items():
                                         for idx, entry in enumerate(child_entries):  # Use enumerate to get both idx and entry
@@ -559,6 +559,7 @@ class DocumentAIProcessor:
 
                                 if rows:
                                     df = pd.DataFrame(rows)
+                                    df.rename(columns={"Type": "Merge Field Name"}, inplace=True)
                                     df.to_excel(writer, sheet_name=sheet_name, index=False)
                                     
                                     # Format the worksheet
@@ -578,9 +579,9 @@ class DocumentAIProcessor:
                                     
                                     # Apply formats
                                     for row_idx, row in enumerate(rows, 1):
-                                        if row.get('Type') in section_names:
-                                            worksheet.set_row(row_idx, None, header_format)
-                                        elif row.get('Type') == 'Separator':
+                                        # if row.get('Type') in section_names:
+                                        #     worksheet.set_row(row_idx, None, header_format)
+                                        if row.get('Type') == 'Separator':
                                             worksheet.set_row(row_idx, None, separator_format)
                                     
                                     # Adjust column widths

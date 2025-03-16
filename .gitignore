@@ -1,9 +1,6 @@
 neon-camp-449123-j1-ac5287aca4bd.json
-<<<<<<< HEAD
-.env
 client_secret_doc_ai_extraction.json
-=======
 *.zip
 deploy.sh
 .env
->>>>>>> section-extraction
+*.pyc
