@@ -29,7 +29,7 @@ class Geocoding:
             address_components = result.get("address_components", [])
             county_full = None
             for component in address_components:
-                if "administrative_area_level_2" in component["types"]:
+                if "administrative_area_level_2" in component["types"] or "locality" in component["types"]:
                     county_full = component["long_name"]
             
             # Extract geometry
