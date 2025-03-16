@@ -333,6 +333,42 @@ class DocumentAIProcessor:
         
         return None
 
+    def rename_column_type(self, section: str, name: str) -> str:
+        if name == "country_name":
+            return "county_name"
+        
+        if name == "speed_limit" and section == 'Road of Crash':
+            return "speed_limit_road"
+        
+        if name == "speed_limit" and section == 'Intersecting Road':
+            return "speed_limit_intersecting"
+        
+        if name == "street_address" and section == 'Road of Crash':
+            return "street_address_road"
+        
+        if name == "street_address" and section == 'Intersecting Road':
+            return "street_address_intersecting"
+        
+        return name
+    
+    def add_field_row(self, section, child_type, entry, rows):
+        confidence = f"{entry.get('confidence', 0):.2%}"
+        field_row = {
+            "Type": self.rename_column_type(section, child_type),
+            "Value": self.match_string_for_boolean(child_type, entry.get("value", ""))
+        }
+        rows.append(field_row)
+
+    def construct_full_address(self, street_address, entry):
+        full_address = (
+            f'{street_address.get("block_num", "")} '
+            f'{street_address.get("street_prefix", "")} '
+            f'{street_address.get("street_name", "")} '
+            f'{entry.get("value", "")}'
+        ).strip()  # Remove extra spaces
+        return full_address
+
+
     def match_string_for_boolean(self, types: str, string: str) -> str:
         elgible_type = ["outside_city_limit", "crash_damage_1000", 
                         'owner_lesse_tick_box','proof_of_fin_resp','investigation_complete']
@@ -340,7 +376,7 @@ class DocumentAIProcessor:
             return "true" if "☑" in string.lower() else "false"
         return dictionary.lookup(dictionary, types, string)
     
-    def extract_person_description(self, child_num: int, description: str) -> str:
+    def extract_person_description(self, person_idx: int, description: str) -> str:
         # Replace spaces with newline characters
         input_string = description.replace(' ', '\n')
         
@@ -362,19 +398,13 @@ class DocumentAIProcessor:
             value = values[i] if i < len(values) else ''  # Get value or default to empty string
             if value == '':
                 child_row = {
-                    "Page": child_num,
-                    "Level": "child",
-                    "Type": key,  # Use the key as the "Type"
-                    "Value": '',  # Use the corresponding value
-                    "Confidence": "100.00%"  # Default confidence (can be dynamic if needed)
+                    "Type": f"person{person_idx}_{key}",  # Use the key as the "Type"
+                    "Value": ''  # Use the corresponding value
                 }
             else:
                 child_row = {
-                    "Page": child_num,
-                    "Level": "child",
-                    "Type": key,  # Use the key as the "Type"
-                    "Value": dictionary.lookup(dictionary, key, value),  # Use the corresponding value
-                    "Confidence": "100.00%"  # Default confidence (can be dynamic if needed)
+                    "Type": f"person{person_idx}_{key}",  # Use the key as the "Type"
+                    "Value": dictionary.lookup(dictionary, key, value)  # Use the corresponding value
                 }
             child_rows.append(child_row)
         
@@ -463,124 +493,70 @@ class DocumentAIProcessor:
 
                                 for section in section_names:
                                     section_header = {
-                                        "Page": page_num,
-                                        "Level": "Section Header",
                                         "Type": section,
-                                        "Value": "",
-                                        "Confidence": ""
+                                        "Value": ""
                                     }
                                     rows.append(section_header)
 
                                     for child_type, child_entries in parent_entity.get("child_fields", {}).items():
-                                        # Loop through each entry in the field_entries list
-                                        for entry in child_entries:
+                                        for idx, entry in enumerate(child_entries):  # Use enumerate to get both idx and entry
                                             if section == "General Information" and child_type in general_info:
-                                                field_row = {
-                                                    "Page": page_num,
-                                                    "Level": "Field",
-                                                    "Type": child_type,
-                                                    "Value": self.match_string_for_boolean(child_type, entry.get("value", "")),
-                                                    "Confidence": f"{entry.get('confidence', 0):.2%}"
-                                                }
-
-                                                rows.append(field_row)
+                                                self.add_field_row(section, child_type, entry, rows)
 
                                                 if child_type in eligible_geocoding:
                                                     if entry.get("type", "") == 'city_name':
                                                         geocoding_temp_address += entry.get("value", "") + ", "
                                                     else:
-                                                        geocoding_temp_address +=  entry.get("value", "")
-                                                        geocode_res = geocoding.call(geocoding, child_type, geocoding_temp_address)
+                                                        geocoding_temp_address += entry.get("value", "")
+                                                        geocode_res = geocoding.call(geocoding, self.rename_column_type(section, child_type), geocoding_temp_address)
                                                         for geocode in geocode_res:
                                                             for key, value in geocode.items():
-                                                                field_row = {
-                                                                    "Page": page_num,
-                                                                    "Level": "Field",
-                                                                    "Type": key,
-                                                                    "Value": value,
-                                                                    "Confidence": ""
-                                                                }
+                                                                self.add_field_row(section, key, {"value": value, "confidence": 0}, rows)
 
-                                                                rows.append(field_row)
-                                            
                                             if section == "Road of Crash" and child_type in road_of_crash:
-                                                # If the field type is not eligible, add it to the rows list
                                                 if child_type not in eligible_types:
-                                                    field_row = {
-                                                        "Page": page_num,
-                                                        "Level": "Field",
-                                                        "Type": child_type,
-                                                        "Value": self.match_string_for_boolean(child_type, entry.get("value", "")),
-                                                        "Confidence": f"{entry.get('confidence', 0):.2%}"
-                                                    }
-                                                    rows.append(field_row)
-                                                else:
-                                                    # If the field type is 'street_suffix', construct the full street address
-                                                    if child_type == "street_suffix":
-                                                        # Construct the full street address using components from street_address
-                                                        full_address = (
-                                                            f'{street_address.get("block_num", "")} '
-                                                            f'{street_address.get("street_prefix", "")} '
-                                                            f'{street_address.get("street_name", "")} '
-                                                            f'{entry.get("value", "")}'
-                                                        ).strip()  # Remove any extra spaces
-                                                        
-                                                        # Add the full street address to the rows list
-                                                        field_row = {
-                                                            "Page": page_num,
-                                                            "Level": "Field",
-                                                            "Type": "street_address",
-                                                            "Value": full_address,
-                                                            "Confidence": f"{entry.get('confidence', 0):.2%}"
-                                                        }
-                                                        rows.append(field_row)
+                                                    if child_type == 'speed_limit':
+                                                        if idx == 0:
+                                                            self.add_field_row(section, child_type, entry, rows)
                                                     else:
-                                                        # Store the value in the street_address dictionary for later use
+                                                        self.add_field_row(section, child_type, entry, rows)
+                                                else:
+                                                    if child_type == "street_suffix":
+                                                        if idx == 0:
+                                                            full_address = self.construct_full_address(street_address, entry)
+                                                            field_row = {
+                                                                "Type": self.rename_column_type(section, "street_address"),
+                                                                "Value": full_address
+                                                            }
+                                                            rows.append(field_row)
+                                                    else:
                                                         street_address[child_type] = entry.get("value", "")
 
                                             if section == "Intersecting Road" and child_type in intersect_road:
-                                                # If the field type is not eligible, add it to the rows list
                                                 if child_type not in eligible_types:
-                                                    field_row = {
-                                                        "Page": page_num,
-                                                        "Level": "Field",
-                                                        "Type": child_type,
-                                                        "Value": self.match_string_for_boolean(child_type, entry.get("value", "")),
-                                                        "Confidence": f"{entry.get('confidence', 0):.2%}"
-                                                    }
-                                                    rows.append(field_row)
-                                                else:
-                                                    # If the field type is 'street_suffix', construct the full street address
-                                                    if child_type == "street_suffix":
-                                                        # Construct the full street address using components from street_address
-                                                        full_address = (
-                                                            f'{street_address.get("block_num", "")} '
-                                                            f'{street_address.get("street_prefix", "")} '
-                                                            f'{street_address.get("street_name", "")} '
-                                                            f'{entry.get("value", "")}'
-                                                        ).strip()  # Remove any extra spaces
-
-                                                        # Add the full street address to the rows list
-                                                        field_row = {
-                                                            "Page": page_num,
-                                                            "Level": "Field",
-                                                            "Type": "street_address",
-                                                            "Value": full_address,
-                                                            "Confidence": f"{entry.get('confidence', 0):.2%}"
-                                                        }
-                                                        rows.append(field_row)
+                                                    if child_type == 'speed_limit':
+                                                        if idx == 1:
+                                                            self.add_field_row(section, child_type, entry, rows)
                                                     else:
-                                                        # Store the value in the street_address dictionary for later use
+                                                        self.add_field_row(section, child_type, entry, rows)
+                                                else:
+                                                    if child_type == "street_suffix":
+                                                        if idx == 1:
+                                                            full_address = self.construct_full_address(street_address, entry)
+                                                            field_row = {
+                                                                "Type": self.rename_column_type(section, "street_address"),
+                                                                "Value": full_address
+                                                            }
+                                                            rows.append(field_row)
+                                                    else:
                                                         street_address[child_type] = entry.get("value", "")
 
                                 # Add separator
                                 rows.append({
-                                    "Page": page_num,
-                                    "Level": "Separator",
-                                    "Type": "",
-                                    "Value": "",
-                                    "Confidence": ""
+                                    "Type": "Separator",
+                                    "Value": ""
                                 })
+
                                 if rows:
                                     df = pd.DataFrame(rows)
                                     df.to_excel(writer, sheet_name=sheet_name, index=False)
@@ -602,9 +578,9 @@ class DocumentAIProcessor:
                                     
                                     # Apply formats
                                     for row_idx, row in enumerate(rows, 1):
-                                        if row.get('Level') == 'Section Header':
+                                        if row.get('Type') in section_names:
                                             worksheet.set_row(row_idx, None, header_format)
-                                        elif row.get('Level') == 'Separator':
+                                        elif row.get('Type') == 'Separator':
                                             worksheet.set_row(row_idx, None, separator_format)
                                     
                                     # Adjust column widths
@@ -620,11 +596,8 @@ class DocumentAIProcessor:
                                 
                                 # Add parent information
                                 parent_row = {
-                                    "Page": page_num,
-                                    "Level": "Parent",
                                     "Type": parent_type,
-                                    "Value": parent_entity.get('value', ''),
-                                    "Confidence": f"{parent_entity.get('confidence', 0):.2%}"
+                                    "Value": parent_entity.get('value', '')
                                 }
                                 rows.append(parent_row)
                                 
@@ -635,11 +608,8 @@ class DocumentAIProcessor:
                                         for person_idx, child_entry in enumerate(child_entries, 1):
                                             # Add person header
                                             person_header_row = {
-                                                "Page": page_num,
-                                                "Level": "Person Header",
                                                 "Type": f"Person {person_idx}",
-                                                "Value": f"Person {person_idx} Details",
-                                                "Confidence": ""
+                                                "Value": f"Person {person_idx} Details"
                                             }
                                             rows.append(person_header_row)
                                             
@@ -648,14 +618,11 @@ class DocumentAIProcessor:
                                             for entity in child_entry.get("entities", []):
                                                 # Create entity_row with person_idx appended to the type
                                                 if entity.get('type', '') == 'person_description':
-                                                    person_description.append(self.extract_person_description(page_num, entity.get('value', '')))
+                                                    person_description.append(self.extract_person_description(person_idx, entity.get('value', '')))
                                                 else:
                                                     entity_row = {
-                                                        "Page": page_num,
-                                                        "Level": "Entity",
                                                         "Type": str(entity.get('type', '')).replace('_', f'{person_idx}_'),
-                                                        "Value": self.match_string_for_boolean(entity.get('type', ''), entity.get('value', '')),
-                                                        "Confidence": f"{entity.get('confidence', 0):.2%}"
+                                                        "Value": self.match_string_for_boolean(entity.get('type', ''), entity.get('value', ''))
                                                     }
                                                     
                                                     # Append the entity_row to the rows list
@@ -667,21 +634,15 @@ class DocumentAIProcessor:
                                             
                                             # Add separator
                                             rows.append({
-                                                "Page": page_num,
-                                                "Level": "Separator",
-                                                "Type": "",
-                                                "Value": "",
-                                                "Confidence": ""
+                                                "Type": "Separator",
+                                                "Value": ""
                                             })
                                     else:
                                         # Process other child fields
                                         for child_entry in child_entries:
                                             child_row = {
-                                                "Page": page_num,
-                                                "Level": "Child",
                                                 "Type": child_type,
-                                                "Value": self.match_string_for_boolean(child_type, child_entry.get('value', '')),
-                                                "Confidence": f"{child_entry.get('confidence', 0):.2%}"
+                                                "Value": self.match_string_for_boolean(child_type, child_entry.get('value', ''))
                                             }
                                             rows.append(child_row)
 
@@ -690,11 +651,8 @@ class DocumentAIProcessor:
                                                 for geocode in geocode_res:
                                                     for key, value in geocode.items():
                                                         field_row = {
-                                                            "Page": page_num,
-                                                            "Level": "Child",
                                                             "Type": key,
-                                                            "Value": value,
-                                                            "Confidence": ""
+                                                            "Value": value
                                                         }
 
                                                         rows.append(field_row)
@@ -718,9 +676,9 @@ class DocumentAIProcessor:
                                     })
                                     
                                     for row_idx, row in enumerate(rows, 1):
-                                        if row.get('Level') == 'Person Header':
+                                        if 'Person' in row.get('Type'):
                                             worksheet.set_row(row_idx, None, header_format)
-                                        elif row.get('Level') == 'Separator':
+                                        elif row.get('Type') == 'Separator':
                                             worksheet.set_row(row_idx, None, separator_format)
                                     
                                     self._adjust_column_widths(writer, sheet_name, df)
@@ -735,22 +693,16 @@ class DocumentAIProcessor:
                             
                             for parent_entity in parent_entities:
                                 parent_row = {
-                                    "Page": page_num,
-                                    "Level": "Parent",
                                     "Type": parent_type,
-                                    "Value": parent_entity.get('value', ''),
-                                    "Confidence": f"{parent_entity.get('confidence', 0):.2%}"
+                                    "Value": parent_entity.get('value', '')
                                 }
                                 rows.append(parent_row)
                                 
                                 for child_type, child_entries in parent_entity.get("child_fields", {}).items():
                                     for child_entry in child_entries:
                                         child_row = {
-                                            "Page": page_num,
-                                            "Level": "Child",
                                             "Type": child_type,
-                                            "Value": self.match_string_for_boolean(child_type, child_entry.get('value', '')),
-                                            "Confidence": f"{child_entry.get('confidence', 0):.2%}"
+                                            "Value": self.match_string_for_boolean(child_type, child_entry.get('value', ''))
                                         }
                                         rows.append(child_row)
 
@@ -759,22 +711,16 @@ class DocumentAIProcessor:
                                             for geocode in geocode_res:
                                                 for key, value in geocode.items():
                                                     field_row = {
-                                                        "Page": page_num,
-                                                        "Level": "Child",
                                                         "Type": key,
-                                                        "Value": value,
-                                                        "Confidence": ""
+                                                        "Value": value
                                                     }
 
                                                     rows.append(field_row)
                                             
                                         for entity in child_entry.get("entities", []):
                                             entity_row = {
-                                                "Page": page_num,
-                                                "Level": "Entity",
                                                 "Type": str(entity.get('type', '')).replace('_', f'{person_idx}_'),
-                                                "Value": self.match_string_for_boolean(entity.get('type', ''), entity.get('value', '')),
-                                                "Confidence": f"{entity.get('confidence', 0):.2%}"
+                                                "Value": self.match_string_for_boolean(entity.get('type', ''), entity.get('value', ''))
                                             }
                                             rows.append(entity_row)
                             
